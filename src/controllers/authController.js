@@ -48,8 +48,8 @@ const register = async (req, res, next) => {
     });
 
     // Generate a custom token and exchange it for an ID token
-    // We use Firebase REST API to sign in and get an ID token
-    const token = await signInWithEmailPassword(email, password);
+    const customToken = await auth.createCustomToken(uid);
+    const token = await signInWithCustomToken(customToken);
 
     return res.status(201).json({
       token,
@@ -95,7 +95,7 @@ const login = async (req, res, next) => {
 };
 
 /**
- * Signs in a user via Firebase Auth REST API and returns an ID token.
+ * Signs in a user via Firebase Auth REST API using email and password.
  * This is necessary because Firebase Admin SDK does not support
  * signing in with email/password directly.
  *
@@ -154,6 +154,43 @@ const signInWithEmailPassword = async (email, password) => {
       }
     }
 
+    throw createError('Authentication failed. Please try again.', 500);
+  }
+};
+
+/**
+ * Signs in a user via Firebase Auth REST API using a custom token.
+ * Exchanges a custom token for an ID token.
+ *
+ * @param {string} customToken
+ * @returns {Promise<string>} Firebase ID token
+ * @throws {AppError} On invalid token or API errors
+ */
+const signInWithCustomToken = async (customToken) => {
+  const apiKey = process.env.FIREBASE_API_KEY;
+
+  if (!apiKey) {
+    throw createError(
+      'Firebase API key is not configured. Please set FIREBASE_API_KEY environment variable.',
+      500
+    );
+  }
+
+  try {
+    const response = await axios.post(
+      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=${apiKey}`,
+      {
+        token: customToken,
+        returnSecureToken: true,
+      },
+      {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 10000,
+      }
+    );
+
+    return response.data.idToken;
+  } catch (err) {
     throw createError('Authentication failed. Please try again.', 500);
   }
 };
