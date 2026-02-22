@@ -1,225 +1,203 @@
 /**
  * Auth Controller
+ *
  * Handles user registration and login using Firebase Authentication.
- * Returns Firebase ID tokens (JWT) for subsequent authenticated requests.
+ * Passwords are managed by Firebase Auth (bcrypt-equivalent hashing internally).
+ * Returns Firebase ID tokens for subsequent authenticated API calls.
+ *
+ * Endpoints:
+ *   POST /api/auth/register  - Register a new user
+ *   POST /api/auth/login     - Login an existing user
  */
 
-const { auth, db } = require('../config/firebase');
+const axios = require('axios');
+const { getAuth, getFirestore, FieldValue } = require('../config/firebase');
 const { registerSchema, loginSchema } = require('../validators/auth');
+
+// Firebase REST API base URL for client-side auth operations
+const FIREBASE_AUTH_REST_URL = 'https://identitytoolkit.googleapis.com/v1/accounts';
+
+/**
+ * Get the Firebase Web API key from environment variables.
+ * Required for Firebase REST API calls (signIn, signUp).
+ */
+function getFirebaseApiKey() {
+  const apiKey = process.env.FIREBASE_WEB_API_KEY;
+  if (!apiKey) {
+    throw new Error('FIREBASE_WEB_API_KEY environment variable is not set.');
+  }
+  return apiKey;
+}
 
 /**
  * POST /api/auth/register
- * Creates a new Firebase user and stores profile in Firestore.
  *
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- * @param {Function} next - Express next middleware
+ * Register a new user with email and password.
+ * Creates a Firebase Auth user and a corresponding Firestore user document.
+ *
+ * Request Body:
+ *   - email    {string} Valid email address
+ *   - password {string} Min 8 characters
+ *
+ * Response: 201 { token, user: { uid, email, createdAt } }
  */
-async function register(req, res, next) {
+async function register(req, res) {
   try {
     // Validate request body
-    const { error, value } = registerSchema.validate(req.body, { abortEarly: false });
+    const { error, value } = registerSchema.validate(req.body, {
+      abortEarly: false,
+      stripUnknown: true,
+    });
+
     if (error) {
       return res.status(400).json({
-        error: error.details.map((d) => d.message).join(', '),
+        error: error.details.map((d) => d.message).join('; '),
         code: 400,
       });
     }
 
     const { email, password } = value;
 
-    // Create user in Firebase Authentication
+    // Create user in Firebase Auth
     let userRecord;
     try {
-      userRecord = await auth.createUser({
+      userRecord = await getAuth().createUser({
         email,
         password,
         emailVerified: false,
       });
     } catch (firebaseError) {
-      return res.status(400).json({
-        error: mapFirebaseAuthError(firebaseError),
-        code: 400,
-      });
-    }
-
-    const { uid } = userRecord;
-    const now = new Date();
-
-    // Store user profile in Firestore
-    await db.collection('users').doc(uid).set({
-      uid,
-      email,
-      createdAt: now,
-    });
-
-    // Create a custom token so the client can exchange it for an ID token.
-    // NOTE: In a typical Firebase flow the client SDK calls signInWithEmailAndPassword
-    // and gets the ID token directly. Since this is a REST-only backend we create a
-    // custom token that the frontend can exchange via Firebase client SDK.
-    // We also return user info so the frontend can bootstrap state immediately.
-    const customToken = await auth.createCustomToken(uid);
-
-    return res.status(201).json({
-      token: customToken,
-      user: {
-        uid,
-        email,
-      },
-    });
-  } catch (err) {
-    next(err);
-  }
-}
-
-/**
- * POST /api/auth/login
- * Authenticates an existing user via Firebase Auth REST API and returns an ID token.
- *
- * Firebase Admin SDK does not expose signInWithEmailAndPassword — that is a client
- * SDK method. To authenticate from the backend we call the Firebase Auth REST API
- * (identitytoolkit) which returns an idToken (JWT) directly.
- *
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- * @param {Function} next - Express next middleware
- */
-async function login(req, res, next) {
-  try {
-    // Validate request body
-    const { error, value } = loginSchema.validate(req.body, { abortEarly: false });
-    if (error) {
-      return res.status(400).json({
-        error: error.details.map((d) => d.message).join(', '),
-        code: 400,
-      });
-    }
-
-    const { email, password } = value;
-
-    // Call Firebase Auth REST API to sign in and get ID token
-    const axios = require('axios');
-    const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY;
-
-    if (!FIREBASE_API_KEY) {
-      // Fallback: verify user exists via Admin SDK and issue custom token
-      return await loginWithCustomToken(email, password, res, next);
-    }
-
-    let firebaseResponse;
-    try {
-      firebaseResponse = await axios.post(
-        `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FIREBASE_API_KEY}`,
-        {
-          email,
-          password,
-          returnSecureToken: true,
-        },
-        { timeout: 10000 }
-      );
-    } catch (axiosError) {
-      const fbError = axiosError.response && axiosError.response.data && axiosError.response.data.error;
-      if (fbError) {
-        return res.status(401).json({
-          error: mapFirebaseRestError(fbError.message),
-          code: 401,
+      if (firebaseError.code === 'auth/email-already-exists') {
+        return res.status(400).json({
+          error: 'An account with this email already exists.',
+          code: 400,
         });
       }
-      throw axiosError;
+      if (firebaseError.code === 'auth/invalid-email') {
+        return res.status(400).json({
+          error: 'Invalid email address.',
+          code: 400,
+        });
+      }
+      if (firebaseError.code === 'auth/weak-password') {
+        return res.status(400).json({
+          error: 'Password is too weak. Please choose a stronger password.',
+          code: 400,
+        });
+      }
+      throw firebaseError;
     }
 
-    const { idToken, localId: uid } = firebaseResponse.data;
+    // Create user document in Firestore
+    const db = getFirestore();
+    const userDoc = {
+      uid: userRecord.uid,
+      email: userRecord.email,
+      createdAt: FieldValue.serverTimestamp(),
+    };
+    await db.collection('users').doc(userRecord.uid).set(userDoc);
 
-    // Fetch user profile from Firestore
-    const userDoc = await db.collection('users').doc(uid).get();
-    let userEmail = email;
-    if (userDoc.exists) {
-      userEmail = userDoc.data().email || email;
-    }
+    // Sign in via Firebase REST API to get an ID token
+    const apiKey = getFirebaseApiKey();
+    const signInResponse = await axios.post(
+      `${FIREBASE_AUTH_REST_URL}:signInWithPassword?key=${apiKey}`,
+      { email, password, returnSecureToken: true }
+    );
 
-    return res.status(200).json({
+    const { idToken } = signInResponse.data;
+
+    return res.status(201).json({
       token: idToken,
-      user: {
-        uid,
-        email: userEmail,
-      },
-    });
-  } catch (err) {
-    next(err);
-  }
-}
-
-/**
- * Fallback login using Admin SDK custom token (when FIREBASE_API_KEY is not set).
- * Verifies the user exists and issues a custom token.
- */
-async function loginWithCustomToken(email, password, res, next) {
-  try {
-    let userRecord;
-    try {
-      userRecord = await auth.getUserByEmail(email);
-    } catch (err) {
-      return res.status(401).json({
-        error: 'Invalid email or password.',
-        code: 401,
-      });
-    }
-
-    // We cannot verify the password server-side without the REST API key.
-    // Issue a custom token — the client must exchange it.
-    const customToken = await auth.createCustomToken(userRecord.uid);
-
-    return res.status(200).json({
-      token: customToken,
       user: {
         uid: userRecord.uid,
         email: userRecord.email,
       },
     });
   } catch (err) {
-    next(err);
+    console.error('[authController.register] Error:', err);
+    return res.status(500).json({ error: 'Internal server error', code: 500 });
   }
 }
 
 /**
- * Maps Firebase Admin SDK error codes to user-friendly messages.
- * @param {Error} err - Firebase error object
- * @returns {string} User-friendly error message
+ * POST /api/auth/login
+ *
+ * Authenticate an existing user with email and password.
+ * Returns a Firebase ID token for subsequent API calls.
+ *
+ * Request Body:
+ *   - email    {string} Registered email address
+ *   - password {string} Account password
+ *
+ * Response: 200 { token, user: { uid, email } }
  */
-function mapFirebaseAuthError(err) {
-  switch (err.code) {
-    case 'auth/email-already-exists':
-      return 'An account with this email already exists.';
-    case 'auth/invalid-email':
-      return 'The email address is not valid.';
-    case 'auth/weak-password':
-      return 'Password must be at least 6 characters.';
-    case 'auth/operation-not-allowed':
-      return 'Email/password accounts are not enabled. Please contact support.';
-    default:
-      return err.message || 'Registration failed. Please try again.';
-  }
-}
+async function login(req, res) {
+  try {
+    // Validate request body
+    const { error, value } = loginSchema.validate(req.body, {
+      abortEarly: false,
+      stripUnknown: true,
+    });
 
-/**
- * Maps Firebase REST API error messages to user-friendly messages.
- * @param {string} message - Firebase REST error message
- * @returns {string} User-friendly error message
- */
-function mapFirebaseRestError(message) {
-  switch (message) {
-    case 'EMAIL_NOT_FOUND':
-    case 'INVALID_PASSWORD':
-    case 'INVALID_LOGIN_CREDENTIALS':
-      return 'Invalid email or password.';
-    case 'USER_DISABLED':
-      return 'This account has been disabled. Please contact support.';
-    case 'TOO_MANY_ATTEMPTS_TRY_LATER':
-      return 'Too many failed login attempts. Please try again later.';
-    case 'INVALID_EMAIL':
-      return 'The email address is not valid.';
-    default:
-      return 'Login failed. Please check your credentials and try again.';
+    if (error) {
+      return res.status(400).json({
+        error: error.details.map((d) => d.message).join('; '),
+        code: 400,
+      });
+    }
+
+    const { email, password } = value;
+    const apiKey = getFirebaseApiKey();
+
+    // Sign in via Firebase REST API
+    let signInData;
+    try {
+      const response = await axios.post(
+        `${FIREBASE_AUTH_REST_URL}:signInWithPassword?key=${apiKey}`,
+        { email, password, returnSecureToken: true }
+      );
+      signInData = response.data;
+    } catch (axiosError) {
+      const firebaseErrorCode =
+        axiosError.response?.data?.error?.message || '';
+
+      if (
+        firebaseErrorCode === 'EMAIL_NOT_FOUND' ||
+        firebaseErrorCode === 'INVALID_PASSWORD' ||
+        firebaseErrorCode === 'INVALID_LOGIN_CREDENTIALS'
+      ) {
+        return res.status(401).json({
+          error: 'Invalid email or password.',
+          code: 401,
+        });
+      }
+
+      if (firebaseErrorCode === 'USER_DISABLED') {
+        return res.status(401).json({
+          error: 'This account has been disabled.',
+          code: 401,
+        });
+      }
+
+      if (firebaseErrorCode === 'TOO_MANY_ATTEMPTS_TRY_LATER') {
+        return res.status(429).json({
+          error: 'Too many failed login attempts. Please try again later.',
+          code: 429,
+        });
+      }
+
+      throw axiosError;
+    }
+
+    const { idToken, localId: uid } = signInData;
+
+    return res.status(200).json({
+      token: idToken,
+      user: { uid, email },
+    });
+  } catch (err) {
+    console.error('[authController.login] Error:', err);
+    return res.status(500).json({ error: 'Internal server error', code: 500 });
   }
 }
 

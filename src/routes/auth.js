@@ -1,7 +1,12 @@
 /**
- * Auth Routes
- * Public endpoints for user registration and login.
- * No authentication middleware required on these routes.
+ * Auth Router
+ *
+ * Public routes for user registration and login.
+ * No authentication middleware required.
+ *
+ * Routes:
+ *   POST /api/auth/register  - Register a new user
+ *   POST /api/auth/login     - Login an existing user
  */
 
 const express = require('express');
@@ -10,19 +15,17 @@ const { register, login } = require('../controllers/authController');
 
 /**
  * @route   POST /api/auth/register
- * @desc    Register a new user
+ * @desc    Register a new user account
  * @access  Public
  * @body    { email: string, password: string }
- * @returns { token: string, user: { uid: string, email: string } }
  */
 router.post('/register', register);
 
 /**
  * @route   POST /api/auth/login
- * @desc    Login an existing user
+ * @desc    Login with email and password
  * @access  Public
  * @body    { email: string, password: string }
- * @returns { token: string, user: { uid: string, email: string } }
  */
 router.post('/login', login);
 

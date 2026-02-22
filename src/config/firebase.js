@@ -1,34 +1,37 @@
 /**
- * Firebase Admin SDK Configuration
+ * Firebase Admin SDK Initialization
  *
- * Initializes Firebase Admin SDK using the service account credentials
+ * Initializes the Firebase Admin SDK using the service account credentials
  * provided via the FIREBASE_SERVICE_ACCOUNT_JSON environment variable.
  *
- * This module exports:
- * - admin: The initialized Firebase Admin instance
- * - db: Firestore database instance
- * - auth: Firebase Auth instance
+ * Exports:
+ *   - admin        : Firebase Admin SDK instance
+ *   - getFirestore : Function returning the Firestore database instance
+ *   - getAuth      : Function returning the Firebase Auth instance
+ *   - FieldValue   : Firestore FieldValue helper (serverTimestamp, arrayUnion, etc.)
+ *   - Timestamp    : Firestore Timestamp class
  */
 
 const admin = require('firebase-admin');
-const logger = require('../utils/logger');
+
+let initialized = false;
 
 /**
- * Initialize Firebase Admin SDK
- * Uses FIREBASE_SERVICE_ACCOUNT_JSON environment variable for credentials
+ * Initialize Firebase Admin SDK.
+ * Safe to call multiple times — only initializes once.
  */
 function initializeFirebase() {
-  // Prevent re-initialization if already initialized
-  if (admin.apps.length > 0) {
-    return admin.app();
+  if (initialized || admin.apps.length > 0) {
+    initialized = true;
+    return;
   }
 
   const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
 
   if (!serviceAccountJson) {
     throw new Error(
-      'FIREBASE_SERVICE_ACCOUNT_JSON environment variable is required. ' +
-      'Set it to the JSON string of your Firebase service account key.'
+      'FIREBASE_SERVICE_ACCOUNT_JSON environment variable is not set. ' +
+      'Please provide the Firebase service account credentials as a JSON string.'
     );
   }
 
@@ -42,35 +45,39 @@ function initializeFirebase() {
     );
   }
 
-  try {
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-    });
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+  });
 
-    logger.info('Firebase Admin SDK initialized successfully', {
-      projectId: serviceAccount.project_id,
-    });
-
-    return admin.app();
-  } catch (initError) {
-    throw new Error(
-      'Failed to initialize Firebase Admin SDK: ' + initError.message
-    );
-  }
+  initialized = true;
+  console.log('[Firebase] Admin SDK initialized successfully.');
 }
 
-// Initialize Firebase on module load
+// Initialize on module load
 initializeFirebase();
 
-/** @type {admin.firestore.Firestore} Firestore database instance */
-const db = admin.firestore();
+/**
+ * Get the Firestore database instance.
+ * @returns {FirebaseFirestore.Firestore}
+ */
+function getFirestore() {
+  return admin.firestore();
+}
 
-/** @type {admin.auth.Auth} Firebase Auth instance */
-const auth = admin.auth();
+/**
+ * Get the Firebase Auth instance.
+ * @returns {admin.auth.Auth}
+ */
+function getAuth() {
+  return admin.auth();
+}
 
-// Configure Firestore settings
-db.settings({
-  ignoreUndefinedProperties: true,
-});
+const { FieldValue, Timestamp } = admin.firestore;
 
-module.exports = { admin, db, auth };
+module.exports = {
+  admin,
+  getFirestore,
+  getAuth,
+  FieldValue,
+  Timestamp,
+};
