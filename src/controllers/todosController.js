@@ -1,158 +1,113 @@
 /**
  * Todos Controller
- * Handles all todo CRUD operations, filtering, and search functionality.
- * Todos are stored as a subcollection under each user: users/{uid}/todos/{todoId}
+ *
+ * Handles CRUD operations for todos stored in Firestore.
+ * Each user's todos are stored in a subcollection: users/{uid}/todos/{todoId}
+ *
+ * All input validation is handled upstream by Joi middleware.
+ * Firestore errors are handled by the centralized error handler.
  */
 
-const { db } = require('../config/firebase');
-const { createTodoSchema, updateTodoSchema, listTodosSchema } = require('../validators/todos');
+const { getFirestore } = require('../config/firebase');
+const { createError } = require('../middleware/errorHandler');
+const { Timestamp } = require('firebase-admin/firestore');
 
 /**
- * Performs case-insensitive search on todo fields.
- * Since Firestore doesn't support native full-text search, we fetch filtered
- * results and apply in-memory search on title and description.
+ * Converts a Firestore document snapshot to a plain todo object.
  *
- * @param {Array} todos - Array of todo objects to search through
- * @param {string} searchTerm - The search term to match against
- * @returns {Array} Filtered todos matching the search term
+ * @param {import('firebase-admin/firestore').DocumentSnapshot} doc
+ * @returns {Object} Plain todo object with id and serialized timestamps
  */
-function applySearch(todos, searchTerm) {
-  if (!searchTerm || searchTerm.trim() === '') {
-    return todos;
-  }
-
-  const normalizedTerm = searchTerm.trim().toLowerCase();
-
-  return todos.filter((todo) => {
-    const titleMatch = todo.title && todo.title.toLowerCase().includes(normalizedTerm);
-    const descriptionMatch =
-      todo.description && todo.description.toLowerCase().includes(normalizedTerm);
-    const categoryMatch = todo.category && todo.category.toLowerCase().includes(normalizedTerm);
-
-    return titleMatch || descriptionMatch || categoryMatch;
-  });
-}
-
-/**
- * Adds search metadata to each todo indicating which fields matched.
- *
- * @param {Array} todos - Array of todo objects
- * @param {string} searchTerm - The search term used
- * @returns {Array} Todos with _searchMeta field added
- */
-function addSearchMetadata(todos, searchTerm) {
-  if (!searchTerm || searchTerm.trim() === '') {
-    return todos;
-  }
-
-  const normalizedTerm = searchTerm.trim().toLowerCase();
-
-  return todos.map((todo) => {
-    const matchedFields = [];
-
-    if (todo.title && todo.title.toLowerCase().includes(normalizedTerm)) {
-      matchedFields.push('title');
-    }
-    if (todo.description && todo.description.toLowerCase().includes(normalizedTerm)) {
-      matchedFields.push('description');
-    }
-    if (todo.category && todo.category.toLowerCase().includes(normalizedTerm)) {
-      matchedFields.push('category');
-    }
-
-    return {
-      ...todo,
-      _searchMeta: {
-        matchedFields,
-        searchTerm: searchTerm.trim(),
-      },
-    };
-  });
-}
+const docToTodo = (doc) => {
+  const data = doc.data();
+  return {
+    id: doc.id,
+    title: data.title,
+    description: data.description || null,
+    dueDate: data.dueDate ? data.dueDate.toDate().toISOString() : null,
+    priority: data.priority,
+    category: data.category || null,
+    status: data.status,
+    createdAt: data.createdAt ? data.createdAt.toDate().toISOString() : null,
+    updatedAt: data.updatedAt ? data.updatedAt.toDate().toISOString() : null,
+  };
+};
 
 /**
  * GET /api/todos
- * List todos with optional filtering and search.
  *
- * Query Parameters:
- *   - status: 'pending' | 'completed'
- *   - priority: 'low' | 'medium' | 'high'
- *   - category: string
- *   - search: string (searches title, description, category)
- *   - dueAfter: ISO date string
- *   - dueBefore: ISO date string
- *   - limit: number (default 20, max 100)
- *   - page: number (default 1)
+ * Lists todos for the authenticated user with optional filters.
+ * Supports: status, priority, category, search, dueAfter, dueBefore, limit, page, sortBy, sortOrder
  *
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ * @param {import('express').NextFunction} next
  */
-async function listTodos(req, res) {
+const listTodos = async (req, res, next) => {
   try {
-    // Validate query parameters
-    const { error, value: query } = listTodosSchema.validate(req.query, { abortEarly: false });
-    if (error) {
-      return res.status(400).json({
-        error: error.details.map((d) => d.message).join(', '),
-        code: 400,
-      });
-    }
+    const { uid } = req.user;
+    const db = getFirestore();
 
-    const uid = req.user.uid;
-    const { status, priority, category, search, dueAfter, dueBefore, limit, page } = query;
+    const {
+      status,
+      priority,
+      category,
+      search,
+      dueAfter,
+      dueBefore,
+      limit = 20,
+      page = 1,
+      sortBy = 'createdAt',
+      sortOrder = 'desc',
+    } = req.query;
 
-    // Build Firestore query — start with user's todos subcollection
-    let todosRef = db.collection('users').doc(uid).collection('todos');
-    let firestoreQuery = todosRef;
+    let query = db.collection('users').doc(uid).collection('todos');
 
-    // Apply Firestore-level filters (indexed fields)
+    // Apply filters
     if (status) {
-      firestoreQuery = firestoreQuery.where('status', '==', status);
+      query = query.where('status', '==', status);
     }
     if (priority) {
-      firestoreQuery = firestoreQuery.where('priority', '==', priority);
+      query = query.where('priority', '==', priority);
     }
     if (category) {
-      firestoreQuery = firestoreQuery.where('category', '==', category);
+      query = query.where('category', '==', category);
     }
     if (dueAfter) {
-      firestoreQuery = firestoreQuery.where('dueDate', '>=', new Date(dueAfter));
+      query = query.where('dueDate', '>=', Timestamp.fromDate(new Date(dueAfter)));
     }
     if (dueBefore) {
-      firestoreQuery = firestoreQuery.where('dueDate', '<=', new Date(dueBefore));
+      query = query.where('dueDate', '<=', Timestamp.fromDate(new Date(dueBefore)));
     }
 
-    // Order by creation date (newest first)
-    firestoreQuery = firestoreQuery.orderBy('createdAt', 'desc');
+    // Apply sorting
+    const validSortFields = ['createdAt', 'updatedAt', 'dueDate', 'title'];
+    const sortField = validSortFields.includes(sortBy) ? sortBy : 'createdAt';
+    const direction = sortOrder === 'asc' ? 'asc' : 'desc';
+    query = query.orderBy(sortField, direction);
 
-    // Execute Firestore query
-    const snapshot = await firestoreQuery.get();
+    // Fetch all matching docs for total count and search filtering
+    const snapshot = await query.get();
+    let todos = snapshot.docs.map(docToTodo);
 
-    // Map Firestore documents to plain objects
-    let todos = snapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-      // Convert Firestore Timestamps to ISO strings for JSON serialization
-      createdAt: doc.data().createdAt ? doc.data().createdAt.toDate().toISOString() : null,
-      updatedAt: doc.data().updatedAt ? doc.data().updatedAt.toDate().toISOString() : null,
-      dueDate: doc.data().dueDate ? doc.data().dueDate.toDate().toISOString() : null,
-    }));
-
-    // Apply in-memory search (Firestore doesn't support native full-text search)
+    // Apply in-memory search (Firestore doesn't support full-text search natively)
     if (search) {
-      todos = applySearch(todos, search);
-      // Add search metadata to each matched todo
-      todos = addSearchMetadata(todos, search);
+      const searchLower = search.toLowerCase().trim();
+      todos = todos.filter(
+        (todo) =>
+          todo.title.toLowerCase().includes(searchLower) ||
+          (todo.description && todo.description.toLowerCase().includes(searchLower)) ||
+          (todo.category && todo.category.toLowerCase().includes(searchLower))
+      );
     }
 
-    // Total count after search filtering
     const totalCount = todos.length;
 
     // Apply pagination
-    const pageNum = page || 1;
-    const limitNum = limit || 20;
-    const offset = (pageNum - 1) * limitNum;
-    const paginatedTodos = todos.slice(offset, offset + limitNum);
+    const pageNum = parseInt(page, 10);
+    const limitNum = parseInt(limit, 10);
+    const startIndex = (pageNum - 1) * limitNum;
+    const paginatedTodos = todos.slice(startIndex, startIndex + limitNum);
 
     return res.status(200).json({
       todos: paginatedTodos,
@@ -160,338 +115,131 @@ async function listTodos(req, res) {
       page: pageNum,
       limit: limitNum,
       totalPages: Math.ceil(totalCount / limitNum),
-      ...(search && { searchTerm: search.trim() }),
     });
   } catch (err) {
-    console.error('Error listing todos:', err);
-    return res.status(500).json({
-      error: 'Failed to retrieve todos',
-      code: 500,
-    });
+    next(err);
   }
-}
-
-/**
- * GET /api/todos/search
- * Dedicated search endpoint for todos.
- * Searches across title, description, and category fields.
- *
- * Query Parameters:
- *   - q: string (required) — the search query
- *   - status: 'pending' | 'completed' (optional filter)
- *   - priority: 'low' | 'medium' | 'high' (optional filter)
- *   - limit: number (default 20, max 100)
- *   - page: number (default 1)
- *
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- */
-async function searchTodos(req, res) {
-  try {
-    const { q, status, priority, limit, page } = req.query;
-
-    // Validate search query
-    if (!q || q.trim() === '') {
-      return res.status(400).json({
-        error: 'Search query parameter "q" is required and cannot be empty',
-        code: 400,
-      });
-    }
-
-    const searchTerm = q.trim();
-
-    // Validate search term length
-    if (searchTerm.length > 200) {
-      return res.status(400).json({
-        error: 'Search query cannot exceed 200 characters',
-        code: 400,
-      });
-    }
-
-    // Validate pagination params
-    const pageNum = parseInt(page, 10) || 1;
-    const limitNum = Math.min(parseInt(limit, 10) || 20, 100);
-
-    if (pageNum < 1) {
-      return res.status(400).json({
-        error: 'Page must be a positive integer',
-        code: 400,
-      });
-    }
-
-    const uid = req.user.uid;
-
-    // Build Firestore query with optional filters
-    let firestoreQuery = db.collection('users').doc(uid).collection('todos');
-
-    if (status && ['pending', 'completed'].includes(status)) {
-      firestoreQuery = firestoreQuery.where('status', '==', status);
-    }
-    if (priority && ['low', 'medium', 'high'].includes(priority)) {
-      firestoreQuery = firestoreQuery.where('priority', '==', priority);
-    }
-
-    // Order by creation date
-    firestoreQuery = firestoreQuery.orderBy('createdAt', 'desc');
-
-    // Fetch all matching documents (search requires in-memory filtering)
-    const snapshot = await firestoreQuery.get();
-
-    // Map to plain objects
-    let todos = snapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-      createdAt: doc.data().createdAt ? doc.data().createdAt.toDate().toISOString() : null,
-      updatedAt: doc.data().updatedAt ? doc.data().updatedAt.toDate().toISOString() : null,
-      dueDate: doc.data().dueDate ? doc.data().dueDate.toDate().toISOString() : null,
-    }));
-
-    // Apply full-text search
-    todos = applySearch(todos, searchTerm);
-
-    // Add search metadata
-    todos = addSearchMetadata(todos, searchTerm);
-
-    // Total count after search
-    const totalCount = todos.length;
-
-    // Apply pagination
-    const offset = (pageNum - 1) * limitNum;
-    const paginatedTodos = todos.slice(offset, offset + limitNum);
-
-    return res.status(200).json({
-      todos: paginatedTodos,
-      totalCount,
-      page: pageNum,
-      limit: limitNum,
-      totalPages: Math.ceil(totalCount / limitNum),
-      searchTerm,
-    });
-  } catch (err) {
-    console.error('Error searching todos:', err);
-    return res.status(500).json({
-      error: 'Failed to search todos',
-      code: 500,
-    });
-  }
-}
+};
 
 /**
  * POST /api/todos
- * Create a new todo for the authenticated user.
  *
- * Request Body:
- *   - title: string (required, max 200)
- *   - description: string (optional)
- *   - dueDate: ISO date string (optional)
- *   - priority: 'low' | 'medium' | 'high' (default 'medium')
- *   - category: string (optional, max 50)
+ * Creates a new todo for the authenticated user.
  *
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ * @param {import('express').NextFunction} next
  */
-async function createTodo(req, res) {
+const createTodo = async (req, res, next) => {
   try {
-    const { error, value } = createTodoSchema.validate(req.body, { abortEarly: false });
-    if (error) {
-      return res.status(400).json({
-        error: error.details.map((d) => d.message).join(', '),
-        code: 400,
-      });
-    }
+    const { uid } = req.user;
+    const db = getFirestore();
 
-    const uid = req.user.uid;
-    const now = new Date();
+    const { title, description, dueDate, priority, category, status } = req.body;
+
+    const now = Timestamp.now();
 
     const todoData = {
-      title: value.title.trim(),
-      description: value.description ? value.description.trim() : '',
-      dueDate: value.dueDate ? new Date(value.dueDate) : null,
-      priority: value.priority || 'medium',
-      category: value.category ? value.category.trim() : '',
-      status: 'pending',
+      title: title.trim(),
+      description: description ? description.trim() : null,
+      dueDate: dueDate ? Timestamp.fromDate(new Date(dueDate)) : null,
+      priority: priority || 'medium',
+      category: category ? category.trim() : null,
+      status: status || 'pending',
       createdAt: now,
       updatedAt: now,
     };
 
-    const docRef = await db.collection('users').doc(uid).collection('todos').add(todoData);
+    const docRef = await db
+      .collection('users')
+      .doc(uid)
+      .collection('todos')
+      .add(todoData);
 
-    return res.status(201).json({
-      id: docRef.id,
-      ...todoData,
-      createdAt: todoData.createdAt.toISOString(),
-      updatedAt: todoData.updatedAt.toISOString(),
-      dueDate: todoData.dueDate ? todoData.dueDate.toISOString() : null,
-    });
+    const newDoc = await docRef.get();
+
+    return res.status(201).json(docToTodo(newDoc));
   } catch (err) {
-    console.error('Error creating todo:', err);
-    return res.status(500).json({
-      error: 'Failed to create todo',
-      code: 500,
-    });
+    next(err);
   }
-}
+};
 
 /**
  * PUT /api/todos/:id
- * Update an existing todo (partial update supported).
  *
- * URL Parameters:
- *   - id: string (todo document ID)
+ * Updates an existing todo for the authenticated user.
+ * Only provided fields are updated (partial update).
  *
- * Request Body (all optional):
- *   - title: string (max 200)
- *   - description: string
- *   - dueDate: ISO date string | null
- *   - priority: 'low' | 'medium' | 'high'
- *   - category: string (max 50)
- *   - status: 'pending' | 'completed'
- *
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ * @param {import('express').NextFunction} next
  */
-async function updateTodo(req, res) {
+const updateTodo = async (req, res, next) => {
   try {
-    const { error, value } = updateTodoSchema.validate(req.body, { abortEarly: false });
-    if (error) {
-      return res.status(400).json({
-        error: error.details.map((d) => d.message).join(', '),
-        code: 400,
-      });
+    const { uid } = req.user;
+    const { id } = req.params;
+    const db = getFirestore();
+
+    const docRef = db.collection('users').doc(uid).collection('todos').doc(id);
+    const doc = await docRef.get();
+
+    if (!doc.exists) {
+      return next(createError('Todo not found.', 404));
     }
 
-    const uid = req.user.uid;
-    const todoId = req.params.id;
+    const { title, description, dueDate, priority, category, status } = req.body;
 
-    const todoRef = db.collection('users').doc(uid).collection('todos').doc(todoId);
-    const todoDoc = await todoRef.get();
+    const updates = {
+      updatedAt: Timestamp.now(),
+    };
 
-    if (!todoDoc.exists) {
-      return res.status(404).json({
-        error: 'Todo not found',
-        code: 404,
-      });
+    if (title !== undefined) updates.title = title.trim();
+    if (description !== undefined) updates.description = description ? description.trim() : null;
+    if (dueDate !== undefined) {
+      updates.dueDate = dueDate ? Timestamp.fromDate(new Date(dueDate)) : null;
     }
+    if (priority !== undefined) updates.priority = priority;
+    if (category !== undefined) updates.category = category ? category.trim() : null;
+    if (status !== undefined) updates.status = status;
 
-    // Build update object with only provided fields
-    const updates = { updatedAt: new Date() };
+    await docRef.update(updates);
 
-    if (value.title !== undefined) updates.title = value.title.trim();
-    if (value.description !== undefined) updates.description = value.description.trim();
-    if (value.priority !== undefined) updates.priority = value.priority;
-    if (value.category !== undefined) updates.category = value.category.trim();
-    if (value.status !== undefined) updates.status = value.status;
-    if (value.dueDate !== undefined) {
-      updates.dueDate = value.dueDate ? new Date(value.dueDate) : null;
-    }
+    const updatedDoc = await docRef.get();
 
-    await todoRef.update(updates);
-
-    // Fetch updated document
-    const updatedDoc = await todoRef.get();
-    const updatedData = updatedDoc.data();
-
-    return res.status(200).json({
-      id: todoId,
-      ...updatedData,
-      createdAt: updatedData.createdAt ? updatedData.createdAt.toDate().toISOString() : null,
-      updatedAt: updatedData.updatedAt ? updatedData.updatedAt.toDate().toISOString() : null,
-      dueDate: updatedData.dueDate ? updatedData.dueDate.toDate().toISOString() : null,
-    });
+    return res.status(200).json(docToTodo(updatedDoc));
   } catch (err) {
-    console.error('Error updating todo:', err);
-    return res.status(500).json({
-      error: 'Failed to update todo',
-      code: 500,
-    });
+    next(err);
   }
-}
+};
 
 /**
  * DELETE /api/todos/:id
- * Delete a todo by ID.
  *
- * URL Parameters:
- *   - id: string (todo document ID)
+ * Deletes a todo for the authenticated user.
  *
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ * @param {import('express').NextFunction} next
  */
-async function deleteTodo(req, res) {
+const deleteTodo = async (req, res, next) => {
   try {
-    const uid = req.user.uid;
-    const todoId = req.params.id;
+    const { uid } = req.user;
+    const { id } = req.params;
+    const db = getFirestore();
 
-    const todoRef = db.collection('users').doc(uid).collection('todos').doc(todoId);
-    const todoDoc = await todoRef.get();
+    const docRef = db.collection('users').doc(uid).collection('todos').doc(id);
+    const doc = await docRef.get();
 
-    if (!todoDoc.exists) {
-      return res.status(404).json({
-        error: 'Todo not found',
-        code: 404,
-      });
+    if (!doc.exists) {
+      return next(createError('Todo not found.', 404));
     }
 
-    await todoRef.delete();
+    await docRef.delete();
 
     return res.status(200).json({ success: true });
   } catch (err) {
-    console.error('Error deleting todo:', err);
-    return res.status(500).json({
-      error: 'Failed to delete todo',
-      code: 500,
-    });
+    next(err);
   }
-}
-
-/**
- * GET /api/todos/:id
- * Get a single todo by ID.
- *
- * URL Parameters:
- *   - id: string (todo document ID)
- *
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- */
-async function getTodo(req, res) {
-  try {
-    const uid = req.user.uid;
-    const todoId = req.params.id;
-
-    const todoRef = db.collection('users').doc(uid).collection('todos').doc(todoId);
-    const todoDoc = await todoRef.get();
-
-    if (!todoDoc.exists) {
-      return res.status(404).json({
-        error: 'Todo not found',
-        code: 404,
-      });
-    }
-
-    const data = todoDoc.data();
-
-    return res.status(200).json({
-      id: todoId,
-      ...data,
-      createdAt: data.createdAt ? data.createdAt.toDate().toISOString() : null,
-      updatedAt: data.updatedAt ? data.updatedAt.toDate().toISOString() : null,
-      dueDate: data.dueDate ? data.dueDate.toDate().toISOString() : null,
-    });
-  } catch (err) {
-    console.error('Error fetching todo:', err);
-    return res.status(500).json({
-      error: 'Failed to retrieve todo',
-      code: 500,
-    });
-  }
-}
-
-module.exports = {
-  listTodos,
-  searchTodos,
-  createTodo,
-  updateTodo,
-  deleteTodo,
-  getTodo,
 };
+
+module.exports = { listTodos, createTodo, updateTodo, deleteTodo };

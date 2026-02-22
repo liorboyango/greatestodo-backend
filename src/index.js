@@ -1,103 +1,201 @@
 /**
- * GreatesTODO Backend — Entry Point
- * Express server with Firebase Admin SDK integration.
+ * GreatesTODO Backend — Server Entry Point
+ *
+ * Sets up the Express application with:
+ * - Security headers (Helmet)
+ * - CORS configuration
+ * - Rate limiting
+ * - Request logging (Morgan)
+ * - JSON body parsing
+ * - API routes (auth + todos)
+ * - 404 handler
+ * - Centralized error handler
  */
 
 require('dotenv').config();
 
 const express = require('express');
 const helmet = require('helmet');
-const cors = require('cors');
 const morgan = require('morgan');
-const rateLimit = require('express-rate-limit');
 
-// Initialize Firebase before importing routes
-require('./config/firebase');
-
+const { corsMiddleware } = require('./config/cors');
+const { apiLimiter, authLimiter } = require('./middleware/rateLimiter');
+const { notFoundHandler, errorHandler } = require('./middleware/errorHandler');
 const authRoutes = require('./routes/auth');
 const todosRoutes = require('./routes/todos');
 
+// ─── App Initialization ───────────────────────────────────────────────────────
+
 const app = express();
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT || 5000;
 
 // ─── Security Middleware ──────────────────────────────────────────────────────
 
-app.use(helmet());
-
-// CORS configuration
-const allowedOrigins = [
-  'http://localhost:3000',
-  'https://liorboyango.github.io',
-  ...(process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : []),
-];
-
+/**
+ * Helmet sets various HTTP security headers:
+ * - Content-Security-Policy
+ * - X-Content-Type-Options
+ * - X-Frame-Options
+ * - Strict-Transport-Security (HSTS)
+ * - etc.
+ */
 app.use(
-  cors({
-    origin: (origin, callback) => {
-      // Allow requests with no origin (e.g., mobile apps, curl, Postman)
-      if (!origin) return callback(null, true);
-      if (allowedOrigins.includes(origin)) return callback(null, true);
-      return callback(new Error(`CORS policy: origin ${origin} is not allowed`));
+  helmet({
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", 'data:', 'https:'],
+        connectSrc: ["'self'"],
+        fontSrc: ["'self'"],
+        objectSrc: ["'none'"],
+        mediaSrc: ["'self'"],
+        frameSrc: ["'none'"],
+      },
     },
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: true,
   })
 );
 
-// Rate limiting — 100 requests per minute per IP
-const limiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 100,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Too many requests, please try again later.', code: 429 },
-});
-app.use(limiter);
+// ─── CORS ─────────────────────────────────────────────────────────────────────
 
-// ─── General Middleware ───────────────────────────────────────────────────────
+/**
+ * Apply CORS before other middleware so preflight OPTIONS requests
+ * are handled correctly.
+ */
+app.use(corsMiddleware);
 
-app.use(morgan('combined'));
+// Handle preflight requests explicitly for all routes
+app.options('*', corsMiddleware);
+
+// ─── Request Logging ──────────────────────────────────────────────────────────
+
+/**
+ * Morgan HTTP request logger.
+ * Uses 'combined' format in production (Apache-style) and 'dev' in development.
+ */
+app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
+
+// ─── Body Parsing ─────────────────────────────────────────────────────────────
+
+/**
+ * Parse incoming JSON request bodies.
+ * Limit set to 10kb to prevent large payload attacks.
+ */
 app.use(express.json({ limit: '10kb' }));
+
+/**
+ * Parse URL-encoded bodies (for form submissions).
+ */
 app.use(express.urlencoded({ extended: true, limit: '10kb' }));
 
-// ─── Routes ───────────────────────────────────────────────────────────────────
+// ─── Global Rate Limiting ─────────────────────────────────────────────────────
 
+/**
+ * Apply general rate limiter to all /api routes.
+ * Auth routes get an additional stricter limiter.
+ */
+app.use('/api', apiLimiter);
+
+// ─── Health Check ─────────────────────────────────────────────────────────────
+
+/**
+ * GET /health
+ * Simple health check endpoint for uptime monitoring and load balancers.
+ * Not rate-limited (skipped in rateLimiter config).
+ */
 app.get('/health', (req, res) => {
   res.status(200).json({
     status: 'ok',
-    service: 'GreatesTODO API',
     timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    environment: process.env.NODE_ENV || 'development',
   });
 });
 
-app.use('/api/auth', authRoutes);
+// ─── API Routes ───────────────────────────────────────────────────────────────
+
+/**
+ * Auth routes — stricter rate limiting applied.
+ * POST /api/auth/register
+ * POST /api/auth/login
+ */
+app.use('/api/auth', authLimiter, authRoutes);
+
+/**
+ * Todos routes — protected by auth middleware (applied inside router).
+ * GET    /api/todos
+ * POST   /api/todos
+ * PUT    /api/todos/:id
+ * DELETE /api/todos/:id
+ */
 app.use('/api/todos', todosRoutes);
 
-// ─── 404 Handler ─────────────────────────────────────────────────────────────
+// ─── 404 Handler ──────────────────────────────────────────────────────────────
 
-app.use((req, res) => {
-  res.status(404).json({ error: `Route ${req.method} ${req.path} not found`, code: 404 });
+/**
+ * Catch-all for undefined routes.
+ * Must be placed after all route definitions.
+ */
+app.use(notFoundHandler);
+
+// ─── Centralized Error Handler ────────────────────────────────────────────────
+
+/**
+ * Global error handling middleware.
+ * Must be the LAST middleware registered (4 arguments).
+ */
+app.use(errorHandler);
+
+// ─── Server Start ─────────────────────────────────────────────────────────────
+
+const server = app.listen(PORT, () => {
+  console.log(`[Server] GreatesTODO backend running on port ${PORT}`);
+  console.log(`[Server] Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`[Server] Health check: http://localhost:${PORT}/health`);
 });
 
-// ─── Global Error Handler ─────────────────────────────────────────────────────
+/**
+ * Graceful shutdown handler.
+ * Closes the HTTP server on SIGTERM/SIGINT signals (e.g., from Render or Ctrl+C).
+ */
+const gracefulShutdown = (signal) => {
+  console.log(`[Server] Received ${signal}. Shutting down gracefully...`);
+  server.close(() => {
+    console.log('[Server] HTTP server closed.');
+    process.exit(0);
+  });
 
-// eslint-disable-next-line no-unused-vars
-app.use((err, req, res, next) => {
-  console.error('Unhandled error:', err);
+  // Force shutdown after 10 seconds if server hasn't closed
+  setTimeout(() => {
+    console.error('[Server] Forced shutdown after timeout.');
+    process.exit(1);
+  }, 10000);
+};
 
-  if (err.message && err.message.startsWith('CORS policy')) {
-    return res.status(403).json({ error: err.message, code: 403 });
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+/**
+ * Handle unhandled promise rejections.
+ * Logs the error and exits — let the process manager restart the server.
+ */
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[Server] Unhandled Promise Rejection:', reason);
+  // In production, exit so the process manager can restart
+  if (process.env.NODE_ENV === 'production') {
+    gracefulShutdown('unhandledRejection');
   }
-
-  return res.status(500).json({ error: 'Internal server error', code: 500 });
 });
 
-// ─── Start Server ─────────────────────────────────────────────────────────────
-
-app.listen(PORT, () => {
-  console.log(`GreatesTODO API server running on port ${PORT}`);
-  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+/**
+ * Handle uncaught exceptions.
+ * These are bugs — log and exit immediately.
+ */
+process.on('uncaughtException', (err) => {
+  console.error('[Server] Uncaught Exception:', err);
+  process.exit(1);
 });
 
-module.exports = app;
+module.exports = app; // Export for testing

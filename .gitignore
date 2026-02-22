@@ -40,3 +40,8 @@ Thumbs.db
 # Firebase
 .firebase/
 firebase-debug.log
+
+# Service account keys (NEVER commit these)
+*serviceAccount*.json
+*service-account*.json
+google-credentials.json

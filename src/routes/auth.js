@@ -1,28 +1,39 @@
 /**
  * Auth Routes
- * Public endpoints for user registration and login.
  *
- * POST /api/auth/register  - Create a new user account
- * POST /api/auth/login     - Authenticate and receive a token
+ * POST /api/auth/register — Register a new user
+ * POST /api/auth/login    — Login an existing user
+ *
+ * Validation is applied via Joi middleware before reaching controllers.
  */
 
 const express = require('express');
 const router = express.Router();
-const { register, login } = require('../controllers/authController');
-const { validateRegister, validateLogin } = require('../validators/auth');
+
+const { registerSchema, loginSchema } = require('../validators/auth');
+const { validateBody } = require('../middleware/validate');
+const authController = require('../controllers/authController');
 
 /**
  * POST /api/auth/register
  * Body: { email: string, password: string }
- * Response: { token: string, user: { uid, email } }
+ * Response: { token: string, user: { uid: string, email: string } }
  */
-router.post('/register', validateRegister, register);
+router.post(
+  '/register',
+  validateBody(registerSchema),
+  authController.register
+);
 
 /**
  * POST /api/auth/login
  * Body: { email: string, password: string }
- * Response: { token: string, refreshToken: string, expiresIn: string, user: { uid, email } }
+ * Response: { token: string, user: { uid: string, email: string } }
  */
-router.post('/login', validateLogin, login);
+router.post(
+  '/login',
+  validateBody(loginSchema),
+  authController.login
+);
 
 module.exports = router;
