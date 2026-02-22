@@ -39,12 +39,6 @@ const register = async (req, res, next) => {
     });
     console.log('[Register] User created successfully:', userRecord.uid);
 
-    // Add a short delay to allow Firebase Auth to propagate the new user
-    // This prevents authentication errors when immediately signing in
-    console.log('[Register] Waiting for user propagation');
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    console.log('[Register] Propagation delay complete');
-
     const { uid } = userRecord;
     const now = new Date();
 
@@ -57,10 +51,11 @@ const register = async (req, res, next) => {
     });
     console.log('[Register] User profile stored');
 
-    console.log('[Register] Signing in with email and password');
-    // Sign in to get ID token
-    const token = await signInWithEmailPassword(email, password);
-    console.log('[Register] Signed in successfully');
+    console.log('[Register] Generating custom token for authentication');
+    // Generate custom token and exchange for ID token
+    const customToken = await auth.createCustomToken(uid);
+    const token = await signInWithCustomToken(customToken);
+    console.log('[Register] ID token generated successfully');
 
     return res.status(201).json({
       token,
