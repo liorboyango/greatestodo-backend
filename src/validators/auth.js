@@ -1,14 +1,14 @@
 /**
- * Authentication Validation Schemas
- *
- * Joi schemas for validating auth-related request bodies.
+ * Auth Validation Schemas (Joi)
+ * Validates request bodies for registration and login endpoints.
  */
 
 const Joi = require('joi');
 
 /**
- * Schema for user registration
- * Validates email format and password strength
+ * Schema for POST /api/auth/register
+ * - email: valid email format, required
+ * - password: minimum 6 characters (Firebase minimum), required
  */
 const registerSchema = Joi.object({
   email: Joi.string()
@@ -16,27 +16,28 @@ const registerSchema = Joi.object({
     .max(254)
     .required()
     .messages({
-      'string.email': 'Please provide a valid email address',
-      'string.max': 'Email must not exceed 254 characters',
-      'any.required': 'Email is required',
+      'string.email': 'Please provide a valid email address.',
+      'string.max': 'Email must not exceed 254 characters.',
+      'any.required': 'Email is required.',
+      'string.empty': 'Email is required.',
     }),
 
   password: Joi.string()
-    .min(8)
+    .min(6)
     .max(128)
-    .pattern(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/, 'password strength')
     .required()
     .messages({
-      'string.min': 'Password must be at least 8 characters long',
-      'string.max': 'Password must not exceed 128 characters',
-      'string.pattern.name':
-        'Password must contain at least one uppercase letter, one lowercase letter, and one number',
-      'any.required': 'Password is required',
+      'string.min': 'Password must be at least 6 characters.',
+      'string.max': 'Password must not exceed 128 characters.',
+      'any.required': 'Password is required.',
+      'string.empty': 'Password is required.',
     }),
 });
 
 /**
- * Schema for user login
+ * Schema for POST /api/auth/login
+ * - email: valid email format, required
+ * - password: required (no length restriction for login)
  */
 const loginSchema = Joi.object({
   email: Joi.string()
@@ -44,24 +45,19 @@ const loginSchema = Joi.object({
     .max(254)
     .required()
     .messages({
-      'string.email': 'Please provide a valid email address',
-      'any.required': 'Email is required',
+      'string.email': 'Please provide a valid email address.',
+      'any.required': 'Email is required.',
+      'string.empty': 'Email is required.',
     }),
 
-  password: Joi.string().min(1).max(128).required().messages({
-    'string.min': 'Password is required',
-    'any.required': 'Password is required',
-  }),
+  password: Joi.string()
+    .min(1)
+    .max(128)
+    .required()
+    .messages({
+      'any.required': 'Password is required.',
+      'string.empty': 'Password is required.',
+    }),
 });
 
-/**
- * Validate request body against a Joi schema
- * @param {object} schema - Joi schema
- * @param {object} data - Data to validate
- * @returns {{ value: object, error: object|null }}
- */
-function validate(schema, data) {
-  return schema.validate(data, { abortEarly: false, stripUnknown: true });
-}
-
-module.exports = { registerSchema, loginSchema, validate };
+module.exports = { registerSchema, loginSchema };

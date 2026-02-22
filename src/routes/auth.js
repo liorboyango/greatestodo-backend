@@ -1,17 +1,12 @@
 /**
- * Authentication Routes
- *
- * Public routes for user registration and login.
- * No authentication middleware required.
- *
- * POST /api/auth/register
- * POST /api/auth/login
+ * Auth Routes
+ * Public endpoints for user registration and login.
+ * No authentication middleware required on these routes.
  */
 
 const express = require('express');
-const { register, login } = require('../controllers/authController');
-
 const router = express.Router();
+const { register, login } = require('../controllers/authController');
 
 /**
  * @route   POST /api/auth/register
