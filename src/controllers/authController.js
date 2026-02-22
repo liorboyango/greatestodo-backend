@@ -28,6 +28,18 @@ const register = async (req, res, next) => {
   try {
     const { email, password } = req.body;
 
+    // Log any existing auth token to verify no interference
+    const authHeader = req.headers.authorization;
+    if (authHeader) {
+      logger.warn('[Register] Auth header present during registration', {
+        email,
+        hasAuthHeader: true,
+        authHeaderPrefix: authHeader.substring(0, 20) + '...'
+      });
+    } else {
+      logger.info('[Register] No auth header present during registration', { email });
+    }
+
     const auth = getAuth();
     const db = getFirestore();
 
