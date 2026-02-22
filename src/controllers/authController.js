@@ -12,6 +12,7 @@ const axios = require('axios');
 const { getAuth } = require('../config/firebase');
 const { getFirestore } = require('../config/firebase');
 const { createError } = require('../middleware/errorHandler');
+const logger = require('../utils/logger');
 
 /**
  * POST /api/auth/register
@@ -30,39 +31,44 @@ const register = async (req, res, next) => {
     const auth = getAuth();
     const db = getFirestore();
 
-    console.log('[Register] Creating user in Firebase Auth');
+    logger.info('[Register] Creating user in Firebase Auth', { email });
     // Create user in Firebase Auth
     const userRecord = await auth.createUser({
       email,
       password,
       emailVerified: false,
     });
-    console.log('[Register] User created successfully:', userRecord.uid);
+    logger.info('[Register] User created successfully', { uid: userRecord.uid, email });
 
     const { uid } = userRecord;
     const now = new Date();
 
-    console.log('[Register] Storing user profile in Firestore');
+    logger.info('[Register] Storing user profile in Firestore', { uid, email });
     // Store user profile in Firestore
     await db.collection('users').doc(uid).set({
       uid,
       email,
       createdAt: now,
     });
-    console.log('[Register] User profile stored');
+    logger.info('[Register] User profile stored', { uid, email });
 
-    console.log('[Register] Generating custom token for authentication');
+    logger.info('[Register] Generating custom token for authentication', { uid, email });
     // Generate custom token and exchange for ID token
     const customToken = await auth.createCustomToken(uid);
     const token = await signInWithCustomToken(customToken);
-    console.log('[Register] ID token generated successfully');
+    logger.info('[Register] ID token generated successfully', { uid, email });
 
     return res.status(201).json({
       token,
       user: { uid, email },
     });
   } catch (err) {
-    console.error('[Register] Error during registration:', err.message, err.code);
+    logger.error('[Register] Registration failed', {
+      email: req.body.email,
+      error: err.message,
+      code: err.code,
+      stack: err.stack
+    });
     next(err);
   }
 };
@@ -198,7 +204,10 @@ const signInWithCustomToken = async (customToken) => {
 
     return response.data.idToken;
   } catch (err) {
-    console.error('[SignInWithCustomToken] Error:', err.response?.data?.error?.message || err.message);
+    logger.error('[SignInWithCustomToken] Authentication failed', {
+      error: err.response?.data?.error?.message || err.message,
+      stack: err.stack
+    });
     throw createError('Authentication failed. Please try again.', 500);
   }
 };
