@@ -12,6 +12,7 @@ const axios = require('axios');
 const { getAuth } = require('../config/firebase');
 const { getFirestore } = require('../config/firebase');
 const { createError } = require('../middleware/errorHandler');
+const logger = require('../utils/logger');
 
 /**
  * POST /api/auth/register
@@ -27,35 +28,59 @@ const register = async (req, res, next) => {
   try {
     const { email, password } = req.body;
 
+    // Log any existing auth token to verify no interference
+    const authHeader = req.headers.authorization;
+    if (authHeader) {
+      logger.warn('[Register] Auth header present during registration', {
+        email,
+        hasAuthHeader: true,
+        authHeaderPrefix: authHeader.substring(0, 20) + '...'
+      });
+    } else {
+      logger.info('[Register] No auth header present during registration', { email });
+    }
+
     const auth = getAuth();
     const db = getFirestore();
 
+    logger.info('[Register] Creating user in Firebase Auth', { email });
     // Create user in Firebase Auth
     const userRecord = await auth.createUser({
       email,
       password,
       emailVerified: false,
     });
+    logger.info('[Register] User created successfully', { uid: userRecord.uid, email });
 
     const { uid } = userRecord;
     const now = new Date();
 
+    logger.info('[Register] Storing user profile in Firestore', { uid, email });
     // Store user profile in Firestore
     await db.collection('users').doc(uid).set({
       uid,
       email,
       createdAt: now,
     });
+    logger.info('[Register] User profile stored', { uid, email });
 
-    // Generate a custom token and exchange it for an ID token
-    // We use Firebase REST API to sign in and get an ID token
-    const token = await signInWithEmailPassword(email, password);
+    logger.info('[Register] Generating custom token for authentication', { uid, email });
+    // Generate custom token and exchange for ID token
+    const customToken = await auth.createCustomToken(uid);
+    const token = await signInWithCustomToken(customToken);
+    logger.info('[Register] ID token generated successfully', { uid, email });
 
     return res.status(201).json({
       token,
       user: { uid, email },
     });
   } catch (err) {
+    logger.error('[Register] Registration failed', {
+      email: req.body.email,
+      error: err.message,
+      code: err.code,
+      stack: err.stack
+    });
     next(err);
   }
 };
@@ -95,7 +120,7 @@ const login = async (req, res, next) => {
 };
 
 /**
- * Signs in a user via Firebase Auth REST API and returns an ID token.
+ * Signs in a user via Firebase Auth REST API using email and password.
  * This is necessary because Firebase Admin SDK does not support
  * signing in with email/password directly.
  *
@@ -154,6 +179,47 @@ const signInWithEmailPassword = async (email, password) => {
       }
     }
 
+    throw createError('Authentication failed. Please try again.', 500);
+  }
+};
+
+/**
+ * Signs in a user via Firebase Auth REST API using a custom token.
+ * Exchanges a custom token for an ID token.
+ *
+ * @param {string} customToken
+ * @returns {Promise<string>} Firebase ID token
+ * @throws {AppError} On invalid token or API errors
+ */
+const signInWithCustomToken = async (customToken) => {
+  const apiKey = process.env.FIREBASE_API_KEY;
+
+  if (!apiKey) {
+    throw createError(
+      'Firebase API key is not configured. Please set FIREBASE_API_KEY environment variable.',
+      500
+    );
+  }
+
+  try {
+    const response = await axios.post(
+      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=${apiKey}`,
+      {
+        token: customToken,
+        returnSecureToken: true,
+      },
+      {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 10000,
+      }
+    );
+
+    return response.data.idToken;
+  } catch (err) {
+    logger.error('[SignInWithCustomToken] Authentication failed', {
+      error: err.response?.data?.error?.message || err.message,
+      stack: err.stack
+    });
     throw createError('Authentication failed. Please try again.', 500);
   }
 };

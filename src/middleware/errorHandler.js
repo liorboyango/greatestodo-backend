@@ -53,9 +53,10 @@ const notFoundHandler = (req, res, next) => {
  * Maps Firebase Admin SDK error codes to HTTP status codes and user-friendly messages.
  *
  * @param {Error} err - The original error
+ * @param {boolean} isDev - Whether running in development mode
  * @returns {{ statusCode: number, message: string }}
  */
-const mapFirebaseError = (err) => {
+const mapFirebaseError = (err, isDev = false) => {
   const code = err.code || '';
 
   const firebaseErrorMap = {
@@ -79,7 +80,8 @@ const mapFirebaseError = (err) => {
 
   // Generic Firebase error
   if (code.startsWith('auth/')) {
-    return { statusCode: 401, message: 'Authentication error. Please try again.' };
+    const message = isDev ? `Authentication error (${code}). Please try again.` : 'Authentication error. Please try again.';
+    return { statusCode: 401, message };
   }
 
   return null;
@@ -127,7 +129,7 @@ const errorHandler = (err, req, res, next) => {
   }
 
   // Handle Firebase errors
-  const firebaseMapped = mapFirebaseError(err);
+  const firebaseMapped = mapFirebaseError(err, isDev);
   if (firebaseMapped) {
     return res.status(firebaseMapped.statusCode).json({
       error: firebaseMapped.message,
