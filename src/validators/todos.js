@@ -1,184 +1,152 @@
 /**
- * Todos Validation Schemas (Joi)
- * Validates request bodies and query parameters for todo endpoints.
+ * Todos Validation Schemas
+ * Joi schemas for validating todo-related request data.
+ * Used by the todos controller to validate inputs before processing.
  */
 
 const Joi = require('joi');
 
-// ─── Reusable field schemas ───────────────────────────────────────────────────
-
-const titleSchema = Joi.string().trim().min(1).max(200).required().messages({
-  'string.empty': 'Title cannot be empty',
-  'string.max': 'Title must be at most 200 characters',
-  'any.required': 'Title is required',
-});
-
-const descriptionSchema = Joi.string().trim().max(2000).allow('', null).optional().messages({
-  'string.max': 'Description must be at most 2000 characters',
-});
-
-const dueDateSchema = Joi.string()
-  .isoDate()
-  .allow(null, '')
-  .optional()
-  .messages({
-    'string.isoDate': 'dueDate must be a valid ISO 8601 date string',
-  });
-
-const prioritySchema = Joi.string()
-  .valid('low', 'medium', 'high')
-  .optional()
-  .messages({
-    'any.only': 'Priority must be one of: low, medium, high',
-  });
-
-const categorySchema = Joi.string().trim().max(50).allow('', null).optional().messages({
-  'string.max': 'Category must be at most 50 characters',
-});
-
-const statusSchema = Joi.string()
-  .valid('pending', 'completed')
-  .optional()
-  .messages({
-    'any.only': 'Status must be one of: pending, completed',
-  });
-
-// ─── Query parameter schemas ──────────────────────────────────────────────────
-
 /**
- * Schema for GET /api/todos and GET /api/todos/filter query parameters.
- * All fields are optional — omitting a filter means "no filter applied".
+ * Schema for creating a new todo.
+ * Validates the request body for POST /api/todos.
  */
-const getTodosQuerySchema = Joi.object({
-  // Filters
-  status: Joi.string().valid('pending', 'completed').optional().messages({
-    'any.only': 'status must be one of: pending, completed',
+const createTodoSchema = Joi.object({
+  title: Joi.string().trim().min(1).max(200).required().messages({
+    'string.empty': 'Title cannot be empty',
+    'string.max': 'Title cannot exceed 200 characters',
+    'any.required': 'Title is required',
   }),
 
-  priority: Joi.string().valid('low', 'medium', 'high').optional().messages({
-    'any.only': 'priority must be one of: low, medium, high',
+  description: Joi.string().trim().max(2000).allow('').optional().messages({
+    'string.max': 'Description cannot exceed 2000 characters',
+  }),
+
+  dueDate: Joi.date().iso().allow(null).optional().messages({
+    'date.format': 'Due date must be a valid ISO 8601 date string',
+  }),
+
+  priority: Joi.string().valid('low', 'medium', 'high').default('medium').messages({
+    'any.only': 'Priority must be one of: low, medium, high',
   }),
 
   category: Joi.string().trim().max(50).allow('').optional().messages({
-    'string.max': 'category must be at most 50 characters',
+    'string.max': 'Category cannot exceed 50 characters',
   }),
-
-  dueAfter: Joi.string().isoDate().optional().messages({
-    'string.isoDate': 'dueAfter must be a valid ISO 8601 date string (e.g. 2024-01-01)',
-  }),
-
-  dueBefore: Joi.string().isoDate().optional().messages({
-    'string.isoDate': 'dueBefore must be a valid ISO 8601 date string (e.g. 2024-12-31)',
-  }),
-
-  // Sorting
-  sortBy: Joi.string()
-    .valid('createdAt', 'updatedAt', 'dueDate', 'priority', 'title', 'status')
-    .optional()
-    .default('createdAt')
-    .messages({
-      'any.only': 'sortBy must be one of: createdAt, updatedAt, dueDate, priority, title, status',
-    }),
-
-  sortOrder: Joi.string().valid('asc', 'desc').optional().default('desc').messages({
-    'any.only': 'sortOrder must be one of: asc, desc',
-  }),
-
-  // Pagination
-  page: Joi.number().integer().min(1).optional().default(1).messages({
-    'number.min': 'page must be at least 1',
-    'number.integer': 'page must be an integer',
-  }),
-
-  limit: Joi.number().integer().min(1).max(100).optional().default(20).messages({
-    'number.min': 'limit must be at least 1',
-    'number.max': 'limit must be at most 100',
-    'number.integer': 'limit must be an integer',
-  }),
-}).options({ allowUnknown: false });
+});
 
 /**
- * Schema for POST /api/todos request body.
- */
-const createTodoSchema = Joi.object({
-  title: titleSchema,
-  description: descriptionSchema,
-  dueDate: dueDateSchema,
-  priority: prioritySchema.default('medium'),
-  category: categorySchema,
-  status: statusSchema.default('pending'),
-}).options({ allowUnknown: false });
-
-/**
- * Schema for PUT /api/todos/:id request body.
+ * Schema for updating an existing todo.
  * All fields are optional for partial updates.
+ * Validates the request body for PUT /api/todos/:id.
  */
 const updateTodoSchema = Joi.object({
   title: Joi.string().trim().min(1).max(200).optional().messages({
     'string.empty': 'Title cannot be empty',
-    'string.max': 'Title must be at most 200 characters',
+    'string.max': 'Title cannot exceed 200 characters',
   }),
-  description: descriptionSchema,
-  dueDate: dueDateSchema,
-  priority: prioritySchema,
-  category: categorySchema,
-  status: statusSchema,
+
+  description: Joi.string().trim().max(2000).allow('').optional().messages({
+    'string.max': 'Description cannot exceed 2000 characters',
+  }),
+
+  dueDate: Joi.date().iso().allow(null).optional().messages({
+    'date.format': 'Due date must be a valid ISO 8601 date string',
+  }),
+
+  priority: Joi.string().valid('low', 'medium', 'high').optional().messages({
+    'any.only': 'Priority must be one of: low, medium, high',
+  }),
+
+  category: Joi.string().trim().max(50).allow('').optional().messages({
+    'string.max': 'Category cannot exceed 50 characters',
+  }),
+
+  status: Joi.string().valid('pending', 'completed').optional().messages({
+    'any.only': 'Status must be one of: pending, completed',
+  }),
 })
   .min(1)
-  .options({ allowUnknown: false })
   .messages({
     'object.min': 'At least one field must be provided for update',
   });
 
-// ─── Middleware factories ─────────────────────────────────────────────────────
+/**
+ * Schema for listing/filtering todos.
+ * Validates query parameters for GET /api/todos.
+ * Includes search parameter for full-text search.
+ */
+const listTodosSchema = Joi.object({
+  status: Joi.string().valid('pending', 'completed').optional().messages({
+    'any.only': 'Status must be one of: pending, completed',
+  }),
+
+  priority: Joi.string().valid('low', 'medium', 'high').optional().messages({
+    'any.only': 'Priority must be one of: low, medium, high',
+  }),
+
+  category: Joi.string().trim().max(50).optional().messages({
+    'string.max': 'Category filter cannot exceed 50 characters',
+  }),
+
+  /**
+   * Search term for full-text search across title, description, and category.
+   * Search is case-insensitive and performed in-memory after Firestore query.
+   */
+  search: Joi.string().trim().min(1).max(200).optional().messages({
+    'string.empty': 'Search term cannot be empty',
+    'string.max': 'Search term cannot exceed 200 characters',
+  }),
+
+  dueAfter: Joi.date().iso().optional().messages({
+    'date.format': 'dueAfter must be a valid ISO 8601 date string',
+  }),
+
+  dueBefore: Joi.date().iso().optional().messages({
+    'date.format': 'dueBefore must be a valid ISO 8601 date string',
+  }),
+
+  limit: Joi.number().integer().min(1).max(100).default(20).optional().messages({
+    'number.min': 'Limit must be at least 1',
+    'number.max': 'Limit cannot exceed 100',
+  }),
+
+  page: Joi.number().integer().min(1).default(1).optional().messages({
+    'number.min': 'Page must be at least 1',
+  }),
+});
 
 /**
- * Creates an Express middleware that validates req.query against a Joi schema.
- * @param {Joi.ObjectSchema} schema
- * @returns {Function} Express middleware
+ * Schema for the dedicated search endpoint.
+ * Validates query parameters for GET /api/todos/search.
  */
-function validateQuery(schema) {
-  return (req, res, next) => {
-    const { error, value } = schema.validate(req.query, { abortEarly: false });
-    if (error) {
-      const messages = error.details.map((d) => d.message);
-      return res.status(400).json({ error: messages.join('; '), code: 400 });
-    }
-    // Replace req.query with validated + defaulted values
-    req.query = value;
-    return next();
-  };
-}
+const searchTodosSchema = Joi.object({
+  q: Joi.string().trim().min(1).max(200).required().messages({
+    'string.empty': 'Search query cannot be empty',
+    'string.max': 'Search query cannot exceed 200 characters',
+    'any.required': 'Search query parameter "q" is required',
+  }),
 
-/**
- * Creates an Express middleware that validates req.body against a Joi schema.
- * @param {Joi.ObjectSchema} schema
- * @returns {Function} Express middleware
- */
-function validateBody(schema) {
-  return (req, res, next) => {
-    const { error, value } = schema.validate(req.body, { abortEarly: false });
-    if (error) {
-      const messages = error.details.map((d) => d.message);
-      return res.status(400).json({ error: messages.join('; '), code: 400 });
-    }
-    req.body = value;
-    return next();
-  };
-}
+  status: Joi.string().valid('pending', 'completed').optional().messages({
+    'any.only': 'Status must be one of: pending, completed',
+  }),
 
-// ─── Exported middleware ──────────────────────────────────────────────────────
+  priority: Joi.string().valid('low', 'medium', 'high').optional().messages({
+    'any.only': 'Priority must be one of: low, medium, high',
+  }),
 
-const validateGetTodos = validateQuery(getTodosQuerySchema);
-const validateCreateTodo = validateBody(createTodoSchema);
-const validateUpdateTodo = validateBody(updateTodoSchema);
+  limit: Joi.number().integer().min(1).max(100).default(20).optional().messages({
+    'number.min': 'Limit must be at least 1',
+    'number.max': 'Limit cannot exceed 100',
+  }),
+
+  page: Joi.number().integer().min(1).default(1).optional().messages({
+    'number.min': 'Page must be at least 1',
+  }),
+});
 
 module.exports = {
-  validateGetTodos,
-  validateCreateTodo,
-  validateUpdateTodo,
-  // Export schemas for testing
-  getTodosQuerySchema,
   createTodoSchema,
   updateTodoSchema,
+  listTodosSchema,
+  searchTodosSchema,
 };
