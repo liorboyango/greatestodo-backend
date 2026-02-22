@@ -1,66 +1,93 @@
 /**
- * Todos Router
+ * Todos Routes
+ * All routes are protected by the auth middleware.
  *
- * All routes are protected by the authentication middleware.
- * The authenticated user's UID is available via req.user.uid.
- *
- * Routes:
- *   GET    /api/todos        - List todos (with filters, search, pagination)
- *   GET    /api/todos/:id    - Get a single todo by ID
- *   POST   /api/todos        - Create a new todo
- *   PUT    /api/todos/:id    - Update an existing todo (partial)
- *   DELETE /api/todos/:id    - Delete a todo
+ * GET    /api/todos              - List todos with optional filters & pagination
+ * GET    /api/todos/filter       - Dedicated filter endpoint (same as GET /api/todos)
+ * GET    /api/todos/stats        - Aggregate stats (total, pending, completed, overdue)
+ * GET    /api/todos/categories   - List unique categories for the user
+ * GET    /api/todos/:id          - Get a single todo
+ * POST   /api/todos              - Create a new todo
+ * PUT    /api/todos/:id          - Update a todo (partial)
+ * DELETE /api/todos/:id          - Delete a todo
  */
 
 const express = require('express');
 const router = express.Router();
 const { verifyToken } = require('../middleware/auth');
 const {
-  listTodos,
-  getTodo,
+  getTodos,
+  filterTodos,
+  getTodoStats,
+  getCategories,
+  getTodoById,
   createTodo,
   updateTodo,
   deleteTodo,
 } = require('../controllers/todosController');
+const {
+  validateGetTodos,
+  validateCreateTodo,
+  validateUpdateTodo,
+} = require('../validators/todos');
 
-// Apply authentication middleware to all todo routes
+// All todo routes require authentication
 router.use(verifyToken);
 
-/**
- * @route   GET /api/todos
- * @desc    List all todos for the authenticated user
- * @access  Protected
- * @query   status, priority, category, search, dueAfter, dueBefore, limit, page, sortBy, sortOrder
- */
-router.get('/', listTodos);
+// ─── Specific routes BEFORE parameterized routes ─────────────────────────────
 
 /**
- * @route   GET /api/todos/:id
- * @desc    Get a single todo by ID
- * @access  Protected
+ * GET /api/todos/filter
+ * Dedicated filtering endpoint.
+ * Supports: status, priority, category, dueAfter, dueBefore, sortBy, sortOrder, page, limit
  */
-router.get('/:id', getTodo);
+router.get('/filter', validateGetTodos, filterTodos);
 
 /**
- * @route   POST /api/todos
- * @desc    Create a new todo
- * @access  Protected
- * @body    { title, description?, dueDate?, priority?, category?, status? }
+ * GET /api/todos/stats
+ * Returns aggregate counts: total, pending, completed, overdue, dueSoon, byPriority
  */
-router.post('/', createTodo);
+router.get('/stats', getTodoStats);
 
 /**
- * @route   PUT /api/todos/:id
- * @desc    Partially update an existing todo
- * @access  Protected
- * @body    { title?, description?, dueDate?, priority?, category?, status? }
+ * GET /api/todos/categories
+ * Returns list of unique category strings used by the authenticated user
  */
-router.put('/:id', updateTodo);
+router.get('/categories', getCategories);
+
+// ─── General CRUD routes ──────────────────────────────────────────────────────
 
 /**
- * @route   DELETE /api/todos/:id
- * @desc    Delete a todo
- * @access  Protected
+ * GET /api/todos
+ * List todos with optional filtering, sorting, and pagination.
+ * Query params: status, priority, category, dueAfter, dueBefore,
+ *               sortBy, sortOrder, page, limit
+ */
+router.get('/', validateGetTodos, getTodos);
+
+/**
+ * POST /api/todos
+ * Create a new todo.
+ * Body: { title, description?, dueDate?, priority?, category?, status? }
+ */
+router.post('/', validateCreateTodo, createTodo);
+
+/**
+ * GET /api/todos/:id
+ * Get a single todo by its Firestore document ID.
+ */
+router.get('/:id', getTodoById);
+
+/**
+ * PUT /api/todos/:id
+ * Partially update a todo.
+ * Body: { title?, description?, dueDate?, priority?, category?, status? }
+ */
+router.put('/:id', validateUpdateTodo, updateTodo);
+
+/**
+ * DELETE /api/todos/:id
+ * Delete a todo by its Firestore document ID.
  */
 router.delete('/:id', deleteTodo);
 

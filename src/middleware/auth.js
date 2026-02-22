@@ -1,22 +1,14 @@
 /**
  * Authentication Middleware
- *
- * Verifies the Firebase ID token (JWT) sent in the Authorization header.
- * Attaches the decoded token payload to req.user for downstream handlers.
- *
- * Usage:
- *   router.use(verifyToken);
- *   // or per-route:
- *   router.get('/protected', verifyToken, handler);
- *
- * Expected Header:
- *   Authorization: Bearer <firebase-id-token>
+ * Verifies Firebase ID tokens (JWT) on protected routes.
  */
 
-const { getAuth } = require('../config/firebase');
+const { auth } = require('../config/firebase');
 
 /**
- * Express middleware that verifies a Firebase ID token.
+ * Express middleware that verifies the Bearer token in the Authorization header.
+ * On success, attaches the decoded token payload to req.user.
+ * On failure, responds with 401 Unauthorized.
  *
  * @param {import('express').Request} req
  * @param {import('express').Response} res
@@ -36,53 +28,26 @@ async function verifyToken(req, res, next) {
     const idToken = authHeader.split('Bearer ')[1].trim();
 
     if (!idToken) {
-      return res.status(401).json({
-        error: 'Bearer token is empty',
-        code: 401,
-      });
+      return res.status(401).json({ error: 'Token is empty', code: 401 });
     }
 
-    // Verify the token with Firebase Auth
-    const decodedToken = await getAuth().verifyIdToken(idToken);
-
-    // Attach decoded token to request for downstream use
-    req.user = {
-      uid: decodedToken.uid,
-      email: decodedToken.email,
-    };
+    // Verify the Firebase ID token
+    const decodedToken = await auth.verifyIdToken(idToken);
+    req.user = decodedToken;
 
     return next();
-  } catch (err) {
-    // Handle specific Firebase Auth errors
-    if (err.code === 'auth/id-token-expired') {
-      return res.status(401).json({
-        error: 'Token has expired. Please sign in again.',
-        code: 401,
-      });
+  } catch (error) {
+    console.error('Token verification failed:', error.message);
+
+    if (error.code === 'auth/id-token-expired') {
+      return res.status(401).json({ error: 'Token has expired. Please log in again.', code: 401 });
     }
 
-    if (err.code === 'auth/id-token-revoked') {
-      return res.status(401).json({
-        error: 'Token has been revoked. Please sign in again.',
-        code: 401,
-      });
+    if (error.code === 'auth/argument-error' || error.code === 'auth/invalid-id-token') {
+      return res.status(401).json({ error: 'Invalid token', code: 401 });
     }
 
-    if (
-      err.code === 'auth/argument-error' ||
-      err.code === 'auth/invalid-id-token'
-    ) {
-      return res.status(401).json({
-        error: 'Invalid token. Please sign in again.',
-        code: 401,
-      });
-    }
-
-    console.error('[authMiddleware.verifyToken] Unexpected error:', err);
-    return res.status(401).json({
-      error: 'Authentication failed',
-      code: 401,
-    });
+    return res.status(401).json({ error: 'Unauthorized', code: 401 });
   }
 }
 
