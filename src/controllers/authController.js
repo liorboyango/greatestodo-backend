@@ -30,32 +30,42 @@ const register = async (req, res, next) => {
     const auth = getAuth();
     const db = getFirestore();
 
+    console.log('[Register] Creating user in Firebase Auth');
     // Create user in Firebase Auth
     const userRecord = await auth.createUser({
       email,
       password,
       emailVerified: false,
     });
+    console.log('[Register] User created successfully:', userRecord.uid);
 
     const { uid } = userRecord;
     const now = new Date();
 
+    console.log('[Register] Storing user profile in Firestore');
     // Store user profile in Firestore
     await db.collection('users').doc(uid).set({
       uid,
       email,
       createdAt: now,
     });
+    console.log('[Register] User profile stored');
 
+    console.log('[Register] Creating custom token');
     // Create custom token and exchange for ID token
     const customToken = await auth.createCustomToken(uid);
+    console.log('[Register] Custom token created');
+
+    console.log('[Register] Signing in with custom token');
     const token = await signInWithCustomToken(customToken);
+    console.log('[Register] Signed in successfully');
 
     return res.status(201).json({
       token,
       user: { uid, email },
     });
   } catch (err) {
+    console.error('[Register] Error during registration:', err.message, err.code);
     next(err);
   }
 };
@@ -191,6 +201,7 @@ const signInWithCustomToken = async (customToken) => {
 
     return response.data.idToken;
   } catch (err) {
+    console.error('[SignInWithCustomToken] Error:', err.response?.data?.error?.message || err.message);
     throw createError('Authentication failed. Please try again.', 500);
   }
 };
