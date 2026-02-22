@@ -47,9 +47,8 @@ const register = async (req, res, next) => {
       createdAt: now,
     });
 
-    // Generate a custom token and exchange it for an ID token
-    const customToken = await auth.createCustomToken(uid);
-    const token = await signInWithCustomToken(customToken);
+    // Sign in the user to get an ID token
+    const token = await signInWithEmailPassword(email, password);
 
     return res.status(201).json({
       token,
