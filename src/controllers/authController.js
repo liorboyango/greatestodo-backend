@@ -14,6 +14,7 @@ const { getAuth } = require('../config/firebase');
 const { getFirestore } = require('../config/firebase');
 const { createError } = require('../middleware/errorHandler');
 const logger = require('../utils/logger');
+const { createUser } = require('../models/userModel');
 
 /**
  * POST /api/auth/register
@@ -56,12 +57,8 @@ const register = async (req, res, next) => {
     const { uid } = userRecord;
 
     logger.info('[Register] Storing user profile in Firestore', { uid, email });
-    // Store user profile in Firestore
-    await db.collection('users').doc(uid).set({
-      uid,
-      email,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
+    // Store user profile in Firestore using userModel.createUser
+    await createUser(db, uid, email);
     logger.info('[Register] User profile stored', { uid, email });
 
     logger.info('[Register] Generating custom token for authentication', { uid, email });
