@@ -49,6 +49,12 @@ jest.mock('../middleware/errorHandler', () => ({
   createError: mockCreateError,
 }));
 
+// Mock userModel.createUser
+const mockCreateUserModel = jest.fn();
+jest.mock('../models/userModel', () => ({
+  createUser: mockCreateUserModel,
+}));
+
 describe('Auth Controller', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -64,11 +70,13 @@ describe('Auth Controller', () => {
     it('should create a user and return a token on successful registration', async () => {
       const req = mockRequest({ email: 'test@example.com', password: 'Password123' });
       const res = mockResponse();
+      const db = {};
 
       mockCreateUser.mockResolvedValue({ uid: 'user123' });
       mockCreateCustomToken.mockResolvedValue('custom-token');
       mockAxiosPost.mockResolvedValue({ data: { idToken: 'id-token' } });
-      mockSet.mockResolvedValue();
+      mockCreateUserModel.mockResolvedValue();
+      getFirestore.mockReturnValue(db);
 
       await register(req, res, mockNext);
 
@@ -83,11 +91,7 @@ describe('Auth Controller', () => {
         { token: 'custom-token', returnSecureToken: true },
         { headers: { 'Content-Type': 'application/json' }, timeout: 10000 }
       );
-      expect(mockSet).toHaveBeenCalledWith({
-        uid: 'user123',
-        email: 'test@example.com',
-        createdAt: expect.any(Date),
-      });
+      expect(mockCreateUserModel).toHaveBeenCalledWith(db, 'user123', 'test@example.com');
       expect(res.status).toHaveBeenCalledWith(201);
       expect(res.json).toHaveBeenCalledWith({
         token: 'id-token',
@@ -108,13 +112,13 @@ describe('Auth Controller', () => {
       expect(mockNext).toHaveBeenCalledWith(error);
     });
 
-    it('should call next with error on Firestore set failure', async () => {
+    it('should call next with error on userModel.createUser failure', async () => {
       const req = mockRequest({ email: 'test@example.com', password: 'Password123' });
       const res = mockResponse();
       const error = new Error('Firestore error');
 
       mockCreateUser.mockResolvedValue({ uid: 'user123' });
-      mockSet.mockRejectedValue(error);
+      mockCreateUserModel.mockRejectedValue(error);
 
       await register(req, res, mockNext);
 
@@ -127,7 +131,7 @@ describe('Auth Controller', () => {
       const error = new Error('Custom token error');
 
       mockCreateUser.mockResolvedValue({ uid: 'user123' });
-      mockSet.mockResolvedValue();
+      mockCreateUserModel.mockResolvedValue();
       mockCreateCustomToken.mockRejectedValue(error);
 
       await register(req, res, mockNext);
@@ -141,7 +145,7 @@ describe('Auth Controller', () => {
       const error = new Error('Axios error');
 
       mockCreateUser.mockResolvedValue({ uid: 'user123' });
-      mockSet.mockResolvedValue();
+      mockCreateUserModel.mockResolvedValue();
       mockCreateCustomToken.mockResolvedValue('custom-token');
       mockAxiosPost.mockRejectedValue(error);
 

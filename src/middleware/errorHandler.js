@@ -57,7 +57,7 @@ const notFoundHandler = (req, res, next) => {
  * @returns {{ statusCode: number, message: string }}
  */
 const mapFirebaseError = (err, isDev = false) => {
-  const code = err.code || '';
+  const code = typeof err.code === 'string' ? err.code : String(err.code || '');
 
   const firebaseErrorMap = {
     'auth/email-already-exists': { statusCode: 409, message: 'An account with this email already exists.' },
