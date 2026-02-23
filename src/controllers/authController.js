@@ -6,11 +6,18 @@
  *
  * All input validation is handled upstream by Joi middleware.
  * Firebase errors are mapped to user-friendly messages by the error handler.
+ *
+ * Registration flow:
+ * 1. Check Firestore readiness (guard against NOT_FOUND / unavailable DB)
+ * 2. Create user in Firebase Auth
+ * 3. Write user profile to Firestore
+ *    - If Firestore write fails, delete the Firebase Auth user to prevent
+ *      orphaned accounts that would block re-registration attempts.
+ * 4. Generate and return a Firebase ID token
  */
 
 const axios = require('axios');
-const { getAuth } = require('../config/firebase');
-const { getFirestore } = require('../config/firebase');
+const { getAuth, getFirestore, ensureFirestoreReady } = require('../config/firebase');
 const { createError } = require('../middleware/errorHandler');
 const logger = require('../utils/logger');
 const { createUser } = require('../models/userModel');
@@ -20,6 +27,20 @@ const { createUser } = require('../models/userModel');
  *
  * Creates a new Firebase user and stores their profile in Firestore.
  * Returns a Firebase ID token for immediate authentication.
+ *
+ * Firestore guard:
+ * Before creating the Firebase Auth user, this handler checks that
+ * Firestore is accessible. If Firestore is known to be unavailable
+ * (e.g., database not created, wrong project, IAM permissions missing),
+ * the request is rejected with a 503 Service Unavailable response
+ * immediately — before any Firebase Auth user is created — to avoid
+ * orphaned auth accounts.
+ *
+ * Cleanup on Firestore failure:
+ * If the Firebase Auth user is created successfully but the subsequent
+ * Firestore write fails, this handler attempts to delete the Firebase
+ * Auth user so the client can retry registration without hitting an
+ * "email already exists" error.
  *
  * @param {import('express').Request} req
  * @param {import('express').Response} res
@@ -41,27 +62,108 @@ const register = async (req, res, next) => {
       logger.info('[Register] No auth header present during registration', { email });
     }
 
+    // ── Step 1: Firestore readiness check ────────────────────────────────────
+    // Verify Firestore is accessible before creating the Firebase Auth user.
+    // This prevents orphaned auth accounts when Firestore is misconfigured.
+    logger.info('[Register] Checking Firestore readiness before user creation', { email });
+    try {
+      await ensureFirestoreReady();
+      logger.info('[Register] Firestore readiness check passed', { email });
+    } catch (firestoreErr) {
+      logger.error('[Register] Firestore readiness check failed — aborting registration', {
+        email,
+        error: firestoreErr.message,
+        code: firestoreErr.code,
+      });
+      // Return a 503 with a clear message so the client knows to retry later
+      return res.status(503).json({
+        error: 'Registration is temporarily unavailable due to a database configuration issue. ' +
+               'Please try again later or contact support if this persists.',
+        code: 'FIRESTORE_UNAVAILABLE',
+        retryable: true,
+      });
+    }
+
     const auth = getAuth();
     const db = getFirestore();
 
+    // ── Step 2: Create user in Firebase Auth ──────────────────────────────────
     logger.info('[Register] Creating user in Firebase Auth', { email });
-    // Create user in Firebase Auth
-    const userRecord = await auth.createUser({
+    let userRecord;
+    try {
+      userRecord = await auth.createUser({
+        email,
+        password,
+        emailVerified: false,
+      });
+    } catch (authErr) {
+      logger.error('[Register] Firebase Auth user creation failed', {
+        email,
+        error: authErr.message,
+        code: authErr.code,
+      });
+      throw authErr;
+    }
+    logger.info('[Register] Firebase Auth user created successfully', {
+      uid: userRecord.uid,
       email,
-      password,
-      emailVerified: false,
     });
-    logger.info('[Register] User created successfully', { uid: userRecord.uid, email });
 
     const { uid } = userRecord;
 
+    // ── Step 3: Write user profile to Firestore ───────────────────────────────
+    // If this fails, clean up the Firebase Auth user to prevent orphaned accounts.
     logger.info('[Register] Storing user profile in Firestore', { uid, email });
-    // Store user profile in Firestore using userModel.createUser
-    await createUser(db, uid, email);
-    logger.info('[Register] User profile stored', { uid, email });
+    try {
+      await createUser(db, uid, email);
+      logger.info('[Register] User profile stored in Firestore', { uid, email });
+    } catch (firestoreWriteErr) {
+      logger.error('[Register] Firestore write failed after Auth user creation — attempting cleanup', {
+        uid,
+        email,
+        error: firestoreWriteErr.message,
+        code: firestoreWriteErr.code,
+      });
 
+      // Attempt to delete the Firebase Auth user to prevent orphaned accounts.
+      // If cleanup fails, log the error but still propagate the original error.
+      try {
+        await auth.deleteUser(uid);
+        logger.info('[Register] Firebase Auth user deleted during cleanup (Firestore write failed)', {
+          uid,
+          email,
+        });
+      } catch (cleanupErr) {
+        logger.error(
+          '[Register] CRITICAL: Failed to delete Firebase Auth user after Firestore write failure. ' +
+          'The user account is now orphaned — the user cannot re-register with this email ' +
+          'until the Auth account is manually deleted from the Firebase Console.',
+          {
+            uid,
+            email,
+            cleanupError: cleanupErr.message,
+            cleanupCode: cleanupErr.code,
+            originalError: firestoreWriteErr.message,
+          }
+        );
+      }
+
+      // Invalidate the Firestore readiness cache so the next request re-probes.
+      // This ensures that if the failure was due to a transient issue, the next
+      // registration attempt will re-check rather than assuming Firestore is ready.
+      const { checkFirestoreReadiness } = require('../config/firebase');
+      checkFirestoreReadiness().catch((probeErr) => {
+        logger.warn('[Register] Background Firestore re-probe failed', {
+          error: probeErr.message,
+        });
+      });
+
+      // Propagate the Firestore error to the global error handler
+      throw firestoreWriteErr;
+    }
+
+    // ── Step 4: Generate ID token ─────────────────────────────────────────────
     logger.info('[Register] Generating custom token for authentication', { uid, email });
-    // Generate custom token and exchange for ID token
     const customToken = await auth.createCustomToken(uid);
     const token = await signInWithCustomToken(customToken);
     logger.info('[Register] ID token generated successfully', { uid, email });

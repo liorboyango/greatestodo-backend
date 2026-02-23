@@ -33,6 +33,29 @@ let _initializationError = null;
 let _serviceAccountInfo = null;
 
 /**
+ * Firestore readiness state cache.
+ *
+ * Tracks whether Firestore has been confirmed accessible so that
+ * subsequent requests can skip the expensive live connectivity probe.
+ *
+ * States:
+ *   'unknown'      — Not yet checked (initial state)
+ *   'ready'        — Confirmed accessible (write + read succeeded)
+ *   'unavailable'  — Confirmed inaccessible (last check failed)
+ *
+ * The state is intentionally not reset to 'unknown' after a failure so
+ * that repeated requests during an outage do not hammer Firestore with
+ * health-check writes. The state is refreshed by runStartupFirestoreCheck()
+ * on server startup and can be re-checked via checkFirestoreReadiness().
+ */
+const _firestoreReadiness = {
+  state: 'unknown',   // 'unknown' | 'ready' | 'unavailable'
+  lastCheckedAt: null, // Date of last check
+  lastError: null,     // Last error message (if unavailable)
+  lastDiagnosis: null, // Human-readable diagnosis (if unavailable)
+};
+
+/**
  * Normalizes the private_key field in a service account object.
  *
  * When a service account JSON is stored as an environment variable string,
@@ -263,6 +286,167 @@ const getInitializationStatus = () => {
     errorMessage: _initializationError ? _initializationError.message : null,
     serviceAccount: _serviceAccountInfo,
   };
+};
+
+/**
+ * Returns the current Firestore readiness state.
+ *
+ * This is a fast, synchronous check that returns the cached state from
+ * the last connectivity probe. It does NOT perform a live check.
+ *
+ * Use runStartupFirestoreCheck() to warm the cache at startup, and
+ * checkFirestoreReadiness() to perform a live probe when needed.
+ *
+ * @returns {{ state: string, lastCheckedAt: Date|null, lastError: string|null, lastDiagnosis: string|null }}
+ */
+const getFirestoreReadinessState = () => {
+  return { ..._firestoreReadiness };
+};
+
+/**
+ * Performs a live Firestore connectivity probe and updates the readiness cache.
+ *
+ * This function writes a small health-check document and reads it back to
+ * confirm both write and read access. The result is cached in
+ * _firestoreReadiness so subsequent calls to ensureFirestoreReady() can
+ * return quickly without a network round-trip.
+ *
+ * This is intentionally separate from confirmFirestoreDatabaseAccessible()
+ * to keep the readiness cache update logic self-contained.
+ *
+ * @returns {Promise<boolean>} true if Firestore is accessible, false otherwise
+ */
+const checkFirestoreReadiness = async () => {
+  console.log('[Firestore] Running readiness probe...');
+
+  let db;
+  try {
+    db = getFirestore();
+  } catch (initErr) {
+    _firestoreReadiness.state = 'unavailable';
+    _firestoreReadiness.lastCheckedAt = new Date();
+    _firestoreReadiness.lastError = `Firestore initialization failed: ${initErr.message}`;
+    _firestoreReadiness.lastDiagnosis = 'Firebase Admin SDK is not initialized. Check FIREBASE_SERVICE_ACCOUNT_JSON.';
+    console.error(`[Firestore] Readiness probe FAILED — SDK not initialized: ${initErr.message}`);
+    return false;
+  }
+
+  const probeDocRef = db.collection('_health').doc('readiness-probe');
+  const projectId = _serviceAccountInfo ? _serviceAccountInfo.projectId : null;
+
+  try {
+    // Write probe document
+    await probeDocRef.set({
+      status: 'ok',
+      probedAt: admin.firestore.FieldValue.serverTimestamp(),
+      projectId,
+    });
+
+    // Read it back to confirm read access
+    const doc = await probeDocRef.get();
+    if (!doc.exists) {
+      throw new Error('Probe document was written but could not be read back');
+    }
+
+    // Clean up (best-effort, non-blocking)
+    probeDocRef.delete().catch(() => {});
+
+    _firestoreReadiness.state = 'ready';
+    _firestoreReadiness.lastCheckedAt = new Date();
+    _firestoreReadiness.lastError = null;
+    _firestoreReadiness.lastDiagnosis = null;
+
+    console.log('[Firestore] Readiness probe PASSED — Firestore is accessible');
+    return true;
+  } catch (err) {
+    const diagnosis = classifyFirestoreError(err, '(default)', projectId);
+
+    _firestoreReadiness.state = 'unavailable';
+    _firestoreReadiness.lastCheckedAt = new Date();
+    _firestoreReadiness.lastError = err.message;
+    _firestoreReadiness.lastDiagnosis = diagnosis;
+
+    console.error(`[Firestore] Readiness probe FAILED — code: ${err.code}, message: ${err.message}`);
+    console.error(`[Firestore] Diagnosis: ${diagnosis}`);
+    return false;
+  }
+};
+
+/**
+ * Ensures Firestore is ready before performing a critical operation.
+ *
+ * This is a guard function intended to be called at the start of any
+ * operation that writes to Firestore (e.g., user registration). It:
+ *
+ * 1. If the readiness state is 'ready' — returns immediately (fast path).
+ * 2. If the readiness state is 'unknown' — performs a live probe and
+ *    updates the cache before returning.
+ * 3. If the readiness state is 'unavailable' — performs a live re-probe
+ *    to check if the situation has recovered, then either returns or throws.
+ *
+ * @throws {Error} With statusCode 503 if Firestore is not accessible.
+ *   The error includes a human-readable diagnosis and remediation steps.
+ * @returns {Promise<void>}
+ */
+const ensureFirestoreReady = async () => {
+  // Fast path: already confirmed ready
+  if (_firestoreReadiness.state === 'ready') {
+    return;
+  }
+
+  // For 'unknown' or 'unavailable' states, perform a live probe
+  const isReady = await checkFirestoreReadiness();
+
+  if (!isReady) {
+    const err = new Error(
+      'Firestore database is not accessible. ' +
+      'User registration is temporarily unavailable. ' +
+      (_firestoreReadiness.lastDiagnosis
+        ? `Diagnosis: ${_firestoreReadiness.lastDiagnosis}`
+        : 'Please check the Firebase Console and server logs for details.')
+    );
+    err.statusCode = 503;
+    err.code = 'FIRESTORE_UNAVAILABLE';
+    err.isOperational = true;
+    throw err;
+  }
+};
+
+/**
+ * Runs a Firestore readiness check at server startup.
+ *
+ * This warms the readiness cache so the first user registration request
+ * does not pay the cost of a live connectivity probe. It is called
+ * non-blocking from index.js after the server starts listening.
+ *
+ * If the check fails, the server continues running — the failure is
+ * logged and the readiness state is set to 'unavailable'. Subsequent
+ * registration attempts will re-probe and return a 503 if Firestore
+ * is still down.
+ *
+ * @returns {Promise<void>}
+ */
+const runStartupFirestoreCheck = async () => {
+  console.log('[Firestore] Running startup readiness check...');
+  try {
+    const isReady = await checkFirestoreReadiness();
+    if (isReady) {
+      console.log('[Firestore] Startup readiness check PASSED — Firestore is ready for requests');
+    } else {
+      console.error(
+        '[Firestore] Startup readiness check FAILED — Firestore is not accessible. ' +
+        'Registration and todo operations will return 503 until Firestore is reachable. ' +
+        `Last diagnosis: ${_firestoreReadiness.lastDiagnosis || 'unknown'}`
+      );
+    }
+  } catch (err) {
+    // checkFirestoreReadiness should not throw, but guard defensively
+    console.error(`[Firestore] Startup readiness check threw unexpectedly: ${err.message}`);
+    _firestoreReadiness.state = 'unavailable';
+    _firestoreReadiness.lastCheckedAt = new Date();
+    _firestoreReadiness.lastError = err.message;
+    _firestoreReadiness.lastDiagnosis = 'Unexpected error during startup Firestore check.';
+  }
 };
 
 /**
@@ -683,6 +867,10 @@ module.exports = {
   confirmFirestoreDatabaseAccessible,
   classifyFirestoreError,
   getInitializationStatus,
+  getFirestoreReadinessState,
+  checkFirestoreReadiness,
+  ensureFirestoreReady,
+  runStartupFirestoreCheck,
   // Exported for testing
   normalizeServiceAccount,
   validateServiceAccount,

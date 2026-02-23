@@ -6,10 +6,10 @@
  */
 
 const { register, login } = require('../controllers/authController');
-const { getAuth, getFirestore } = require('../config/firebase');
+const { getAuth, getFirestore, ensureFirestoreReady } = require('../config/firebase');
 const { createError } = require('../middleware/errorHandler');
 
-const mockRequest = (body) => ({ body });
+const mockRequest = (body, headers = {}) => ({ body, headers });
 const mockResponse = () => {
   const res = {};
   res.status = jest.fn().mockReturnValue(res);
@@ -22,19 +22,25 @@ const mockNext = jest.fn();
 const mockCreateUser = jest.fn();
 const mockCreateCustomToken = jest.fn();
 const mockGetUserByEmail = jest.fn();
+const mockDeleteUser = jest.fn();
 const mockCollection = jest.fn();
 const mockDoc = jest.fn();
 const mockSet = jest.fn();
+const mockEnsureFirestoreReady = jest.fn();
+const mockCheckFirestoreReadiness = jest.fn();
 
 jest.mock('../config/firebase', () => ({
   getAuth: jest.fn(() => ({
     createUser: mockCreateUser,
     createCustomToken: mockCreateCustomToken,
     getUserByEmail: mockGetUserByEmail,
+    deleteUser: mockDeleteUser,
   })),
   getFirestore: jest.fn(() => ({
     collection: mockCollection,
   })),
+  ensureFirestoreReady: mockEnsureFirestoreReady,
+  checkFirestoreReadiness: mockCheckFirestoreReadiness,
 }));
 
 // Mock axios
@@ -64,6 +70,10 @@ describe('Auth Controller', () => {
     mockDoc.mockReturnValue({
       set: mockSet,
     });
+    // Default: Firestore is ready
+    mockEnsureFirestoreReady.mockResolvedValue(undefined);
+    // Default: re-probe succeeds
+    mockCheckFirestoreReadiness.mockResolvedValue(true);
   });
 
   describe('register', () => {
@@ -80,6 +90,7 @@ describe('Auth Controller', () => {
 
       await register(req, res, mockNext);
 
+      expect(mockEnsureFirestoreReady).toHaveBeenCalledTimes(1);
       expect(mockCreateUser).toHaveBeenCalledWith({
         email: 'test@example.com',
         password: 'Password123',
@@ -100,6 +111,72 @@ describe('Auth Controller', () => {
       expect(mockNext).not.toHaveBeenCalled();
     });
 
+    it('should return 503 immediately when Firestore readiness check fails', async () => {
+      const req = mockRequest({ email: 'test@example.com', password: 'Password123' });
+      const res = mockResponse();
+
+      const firestoreErr = new Error('Firestore database is not accessible.');
+      firestoreErr.code = 'FIRESTORE_UNAVAILABLE';
+      firestoreErr.statusCode = 503;
+      mockEnsureFirestoreReady.mockRejectedValue(firestoreErr);
+
+      await register(req, res, mockNext);
+
+      // Should NOT create a Firebase Auth user when Firestore is unavailable
+      expect(mockCreateUser).not.toHaveBeenCalled();
+      // Should return 503 directly
+      expect(res.status).toHaveBeenCalledWith(503);
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          code: 'FIRESTORE_UNAVAILABLE',
+          retryable: true,
+        })
+      );
+      expect(mockNext).not.toHaveBeenCalled();
+    });
+
+    it('should delete Firebase Auth user and re-probe Firestore when Firestore write fails', async () => {
+      const req = mockRequest({ email: 'test@example.com', password: 'Password123' });
+      const res = mockResponse();
+
+      mockCreateUser.mockResolvedValue({ uid: 'user123' });
+      const firestoreWriteErr = new Error('Firestore write failed');
+      firestoreWriteErr.code = 5; // NOT_FOUND
+      mockCreateUserModel.mockRejectedValue(firestoreWriteErr);
+      mockDeleteUser.mockResolvedValue();
+
+      await register(req, res, mockNext);
+
+      // Auth user should be created first
+      expect(mockCreateUser).toHaveBeenCalledTimes(1);
+      // Firestore write should be attempted
+      expect(mockCreateUserModel).toHaveBeenCalledTimes(1);
+      // Auth user should be deleted to prevent orphaned account
+      expect(mockDeleteUser).toHaveBeenCalledWith('user123');
+      // Background re-probe should be triggered
+      expect(mockCheckFirestoreReadiness).toHaveBeenCalled();
+      // Error should be propagated to next()
+      expect(mockNext).toHaveBeenCalledWith(firestoreWriteErr);
+    });
+
+    it('should log critical error if Auth user cleanup fails after Firestore write failure', async () => {
+      const req = mockRequest({ email: 'test@example.com', password: 'Password123' });
+      const res = mockResponse();
+
+      mockCreateUser.mockResolvedValue({ uid: 'user123' });
+      const firestoreWriteErr = new Error('Firestore write failed');
+      mockCreateUserModel.mockRejectedValue(firestoreWriteErr);
+      const cleanupErr = new Error('Delete user failed');
+      mockDeleteUser.mockRejectedValue(cleanupErr);
+
+      await register(req, res, mockNext);
+
+      // Cleanup was attempted
+      expect(mockDeleteUser).toHaveBeenCalledWith('user123');
+      // Original error should still be propagated
+      expect(mockNext).toHaveBeenCalledWith(firestoreWriteErr);
+    });
+
     it('should call next with error on Firebase createUser failure', async () => {
       const req = mockRequest({ email: 'test@example.com', password: 'Password123' });
       const res = mockResponse();
@@ -118,6 +195,7 @@ describe('Auth Controller', () => {
       const error = new Error('Firestore error');
 
       mockCreateUser.mockResolvedValue({ uid: 'user123' });
+      mockDeleteUser.mockResolvedValue();
       mockCreateUserModel.mockRejectedValue(error);
 
       await register(req, res, mockNext);

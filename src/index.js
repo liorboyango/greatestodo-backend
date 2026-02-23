@@ -26,6 +26,8 @@ const {
   verifyAdminSdkCredentials,
   confirmFirestoreDatabaseAccessible,
   getInitializationStatus,
+  runStartupFirestoreCheck,
+  getFirestoreReadinessState,
 } = require('./config/firebase');
 const authRoutes = require('./routes/auth');
 const todosRoutes = require('./routes/todos');
@@ -110,10 +112,11 @@ app.use('/api', apiLimiter);
  * GET /health
  * Simple health check endpoint for uptime monitoring and load balancers.
  * Not rate-limited (skipped in rateLimiter config).
- * Includes Firebase initialization status for diagnostics.
+ * Includes Firebase initialization status and Firestore readiness for diagnostics.
  */
 app.get('/health', (req, res) => {
   const firebaseStatus = getInitializationStatus();
+  const firestoreReadiness = getFirestoreReadinessState();
   res.status(200).json({
     status: 'ok',
     timestamp: new Date().toISOString(),
@@ -123,6 +126,11 @@ app.get('/health', (req, res) => {
       initialized: firebaseStatus.initialized,
       hasError: firebaseStatus.hasError,
       projectId: firebaseStatus.serviceAccount ? firebaseStatus.serviceAccount.projectId : null,
+    },
+    firestore: {
+      readinessState: firestoreReadiness.state,
+      lastCheckedAt: firestoreReadiness.lastCheckedAt,
+      lastError: firestoreReadiness.lastError,
     },
   });
 });
@@ -257,6 +265,16 @@ const server = app.listen(PORT, () => {
     }
   }).catch((err) => {
     console.error('[Server] Startup verification error:', err.message);
+  }).finally(() => {
+    // Run the dedicated startup Firestore readiness check to warm the cache.
+    // This ensures the first registration request does not pay the cost of
+    // a live connectivity probe and gets a fast response.
+    //
+    // This runs AFTER the credential + connectivity checks above so that
+    // any initialization errors are already logged before we probe.
+    runStartupFirestoreCheck().catch((err) => {
+      console.error('[Server] Startup Firestore readiness check threw unexpectedly:', err.message);
+    });
   });
 });
 
