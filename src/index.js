@@ -24,6 +24,7 @@ const { notFoundHandler, errorHandler } = require('./middleware/errorHandler');
 const {
   verifyFirestoreConnection,
   verifyAdminSdkCredentials,
+  confirmFirestoreDatabaseAccessible,
   getInitializationStatus,
 } = require('./config/firebase');
 const authRoutes = require('./routes/auth');
@@ -126,6 +127,45 @@ app.get('/health', (req, res) => {
   });
 });
 
+/**
+ * GET /health/firestore
+ * Dedicated Firestore accessibility check endpoint.
+ *
+ * Performs a live read+write test against the Firestore '(default)' database
+ * to confirm it exists and is accessible. Returns detailed diagnostics
+ * including error classification and remediation steps if the database
+ * is not accessible.
+ *
+ * Response codes:
+ * - 200: Database is accessible (canRead and canWrite are both true)
+ * - 503: Database is not accessible (includes errorCode, errorMessage, diagnosis)
+ * - 500: Unexpected error during the check itself
+ *
+ * @returns {200} { status: 'ok', accessible: true, databaseId, projectId, canRead, canWrite, checkedAt }
+ * @returns {503} { status: 'error', accessible: false, databaseId, projectId, errorCode, errorMessage, diagnosis, checkedAt }
+ */
+app.get('/health/firestore', async (req, res) => {
+  try {
+    const result = await confirmFirestoreDatabaseAccessible();
+
+    const statusCode = result.accessible ? 200 : 503;
+    return res.status(statusCode).json({
+      status: result.accessible ? 'ok' : 'error',
+      ...result,
+      checkedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    return res.status(500).json({
+      status: 'error',
+      accessible: false,
+      databaseId: '(default)',
+      errorMessage: err.message,
+      diagnosis: 'Unexpected error during Firestore accessibility check.',
+      checkedAt: new Date().toISOString(),
+    });
+  }
+});
+
 // ─── API Routes ───────────────────────────────────────────────────────────────
 
 /**
@@ -166,6 +206,7 @@ const server = app.listen(PORT, () => {
   console.log(`[Server] GreatesTODO backend running on port ${PORT}`);
   console.log(`[Server] Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`[Server] Health check: http://localhost:${PORT}/health`);
+  console.log(`[Server] Firestore health: http://localhost:${PORT}/health/firestore`);
 
   // Run comprehensive credential verification after server starts.
   // This is a non-blocking diagnostic check — the server continues
@@ -191,8 +232,28 @@ const server = app.listen(PORT, () => {
         'User registration and todo operations will not work until this is resolved. ' +
         'Check the logs above for diagnostic details.'
       );
+      return null;
     } else if (isConnected === true) {
       console.log('[Server] Firestore connectivity: OK');
+      // Perform a full database accessibility confirmation after basic connectivity passes
+      return confirmFirestoreDatabaseAccessible();
+    }
+    return null;
+  }).then((dbResult) => {
+    if (dbResult === null || dbResult === undefined) return;
+
+    if (dbResult.accessible) {
+      console.log('[Server] Firestore \'(default)\' database: ACCESSIBLE');
+      console.log(`[Server]   Project: ${dbResult.projectId}`);
+      console.log(`[Server]   Read access: ${dbResult.canRead ? 'YES' : 'NO'}`);
+      console.log(`[Server]   Write access: ${dbResult.canWrite ? 'YES' : 'NO'}`);
+    } else {
+      console.error('[Server] Firestore \'(default)\' database: NOT ACCESSIBLE');
+      console.error(`[Server]   Error code: ${dbResult.errorCode}`);
+      console.error(`[Server]   Error message: ${dbResult.errorMessage}`);
+      console.error(`[Server]   Diagnosis: ${dbResult.diagnosis}`);
+      console.error('[Server]   User registration will fail until this is resolved.');
+      console.error('[Server]   Check GET /health/firestore for live status.');
     }
   }).catch((err) => {
     console.error('[Server] Startup verification error:', err.message);

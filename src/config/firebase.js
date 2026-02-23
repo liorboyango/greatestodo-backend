@@ -427,6 +427,207 @@ const verifyAdminSdkCredentials = async () => {
 };
 
 /**
+ * Classifies a Firestore error and returns a human-readable diagnosis
+ * with actionable remediation steps.
+ *
+ * Error code reference:
+ * - 5  (NOT_FOUND):        Database or document does not exist
+ * - 7  (PERMISSION_DENIED): Service account lacks IAM permissions
+ * - 14 (UNAVAILABLE):      Transient network or service outage
+ * - 16 (UNAUTHENTICATED):  Invalid or expired credentials
+ *
+ * @param {Error} err - The Firestore error
+ * @param {string} databaseId - The database ID being accessed
+ * @param {string|null} projectId - The Firebase project ID
+ * @returns {string} Human-readable diagnosis with remediation steps
+ */
+function classifyFirestoreError(err, databaseId, projectId) {
+  const code = err.code;
+  const message = err.message || '';
+
+  // gRPC NOT_FOUND (code 5) or REST 404
+  const isNotFound = code === 5 ||
+    message.includes('NOT_FOUND') ||
+    message.includes('404');
+
+  // gRPC PERMISSION_DENIED (code 7) or REST 403
+  const isPermissionDenied = code === 7 ||
+    message.includes('PERMISSION_DENIED') ||
+    message.includes('403');
+
+  // gRPC UNAVAILABLE (code 14) — transient
+  const isUnavailable = code === 14 ||
+    message.includes('UNAVAILABLE');
+
+  // gRPC UNAUTHENTICATED (code 16)
+  const isUnauthenticated = code === 16 ||
+    message.includes('UNAUTHENTICATED');
+
+  if (isNotFound) {
+    const projectHint = projectId ? ` (project: ${projectId})` : '';
+    return (
+      `The Firestore '${databaseId}' database does not exist or is not reachable${projectHint}. ` +
+      'ACTION REQUIRED: Go to Firebase Console > Firestore Database > Create database. ' +
+      'Select "(default)" as the database ID and choose "Native mode". ' +
+      'Also verify that the project_id in FIREBASE_SERVICE_ACCOUNT_JSON matches your Firebase project.'
+    );
+  }
+
+  if (isPermissionDenied) {
+    return (
+      `The service account does not have permission to access the Firestore '${databaseId}' database. ` +
+      'ACTION REQUIRED: Go to Google Cloud Console > IAM & Admin > IAM. ' +
+      'Grant the service account the "Cloud Datastore User" role (roles/datastore.user) ' +
+      'or the "Firebase Admin" role (roles/firebase.admin).'
+    );
+  }
+
+  if (isUnauthenticated) {
+    return (
+      'The service account credentials are invalid or expired. ' +
+      'ACTION REQUIRED: Regenerate the service account key from Firebase Console > ' +
+      'Project Settings > Service Accounts > Generate new private key. ' +
+      'Update the FIREBASE_SERVICE_ACCOUNT_JSON environment variable with the new key.'
+    );
+  }
+
+  if (isUnavailable) {
+    return (
+      'Firestore service is temporarily unavailable. This is likely a transient network issue. ' +
+      'The server will retry on the next request. ' +
+      'If this persists, check the Google Cloud Status Dashboard: https://status.cloud.google.com'
+    );
+  }
+
+  return (
+    `Unexpected Firestore error (code: ${code}). ` +
+    'Check the Firebase Console and Google Cloud Console for project configuration issues. ' +
+    `Error details: ${message}`
+  );
+}
+
+/**
+ * Confirms the Firestore '(default)' database exists and is accessible.
+ *
+ * This function performs a targeted check specifically for the '(default)'
+ * Firestore database by:
+ * 1. Attempting a write to a health-check document (confirms write access)
+ * 2. Attempting a read of the same document (confirms read access)
+ * 3. Cleaning up the health-check document after verification
+ *
+ * Error classification:
+ * - gRPC/REST NOT_FOUND (code 5): Database does not exist or wrong project
+ * - PERMISSION_DENIED (code 7): Database exists but service account lacks access
+ * - UNAVAILABLE (code 14): Transient network/service issue
+ * - UNAUTHENTICATED (code 16): Invalid or expired credentials
+ * - Other errors: Unexpected configuration or infrastructure issues
+ *
+ * @returns {Promise<{
+ *   accessible: boolean,
+ *   databaseId: string,
+ *   projectId: string|null,
+ *   canRead: boolean,
+ *   canWrite: boolean,
+ *   errorCode: number|string|null,
+ *   errorMessage: string|null,
+ *   diagnosis: string|null
+ * }>}
+ */
+const confirmFirestoreDatabaseAccessible = async () => {
+  const projectId = _serviceAccountInfo ? _serviceAccountInfo.projectId : null;
+  const databaseId = '(default)';
+
+  const result = {
+    accessible: false,
+    databaseId,
+    projectId,
+    canRead: false,
+    canWrite: false,
+    errorCode: null,
+    errorMessage: null,
+    diagnosis: null,
+  };
+
+  console.log(`[Firestore] Confirming '${databaseId}' database accessibility...`);
+  if (projectId) {
+    console.log(`[Firestore] Project ID: ${projectId}`);
+  }
+
+  let db;
+  try {
+    db = getFirestore();
+  } catch (initErr) {
+    result.errorMessage = `Firestore initialization failed: ${initErr.message}`;
+    result.diagnosis = 'Firebase Admin SDK is not initialized. Check FIREBASE_SERVICE_ACCOUNT_JSON.';
+    console.error(`[Firestore] ✗ Cannot get Firestore instance: ${initErr.message}`);
+    return result;
+  }
+
+  // Step 1: Write a health-check document to confirm write access
+  const healthDocRef = db.collection('_health').doc('db-accessibility-check');
+  const writePayload = {
+    status: 'ok',
+    checkedAt: admin.firestore.FieldValue.serverTimestamp(),
+    databaseId,
+    projectId,
+  };
+
+  try {
+    await healthDocRef.set(writePayload);
+    result.canWrite = true;
+    console.log(`[Firestore] ✓ Write access confirmed for '${databaseId}' database`);
+  } catch (writeErr) {
+    result.errorCode = writeErr.code;
+    result.errorMessage = writeErr.message;
+    result.diagnosis = classifyFirestoreError(writeErr, databaseId, projectId);
+
+    console.error(`[Firestore] ✗ Write to '${databaseId}' database FAILED`);
+    console.error(`[Firestore]   Error code: ${writeErr.code}`);
+    console.error(`[Firestore]   Error message: ${writeErr.message}`);
+    console.error(`[Firestore]   Diagnosis: ${result.diagnosis}`);
+
+    return result;
+  }
+
+  // Step 2: Read the health-check document to confirm read access
+  try {
+    const doc = await healthDocRef.get();
+    if (doc.exists) {
+      result.canRead = true;
+      console.log(`[Firestore] ✓ Read access confirmed for '${databaseId}' database`);
+    } else {
+      result.errorMessage = 'Health check document was written but could not be read back';
+      result.diagnosis = 'Possible eventual consistency issue or permission mismatch between read and write.';
+      console.warn(`[Firestore] ⚠ Health check document not found after write — possible consistency issue`);
+    }
+  } catch (readErr) {
+    result.errorCode = readErr.code;
+    result.errorMessage = readErr.message;
+    result.diagnosis = classifyFirestoreError(readErr, databaseId, projectId);
+
+    console.error(`[Firestore] ✗ Read from '${databaseId}' database FAILED`);
+    console.error(`[Firestore]   Error code: ${readErr.code}`);
+    console.error(`[Firestore]   Error message: ${readErr.message}`);
+    console.error(`[Firestore]   Diagnosis: ${result.diagnosis}`);
+
+    return result;
+  }
+
+  // Step 3: Clean up the health-check document (best-effort, non-blocking)
+  healthDocRef.delete().catch((deleteErr) => {
+    console.warn(`[Firestore] Could not clean up health check document: ${deleteErr.message}`);
+  });
+
+  result.accessible = true;
+  console.log(`[Firestore] ✓ Firestore '${databaseId}' database is accessible (read + write confirmed)`);
+  if (projectId) {
+    console.log(`[Firestore] ✓ Project: ${projectId}`);
+  }
+
+  return result;
+};
+
+/**
  * Verifies Firestore connectivity by performing a lightweight read operation.
  * Logs the result but does not throw — the server should still start even
  * if Firestore is temporarily unavailable.
@@ -479,6 +680,8 @@ module.exports = {
   initializeApp,
   verifyFirestoreConnection,
   verifyAdminSdkCredentials,
+  confirmFirestoreDatabaseAccessible,
+  classifyFirestoreError,
   getInitializationStatus,
   // Exported for testing
   normalizeServiceAccount,
