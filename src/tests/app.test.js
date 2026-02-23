@@ -93,6 +93,27 @@ describe('Auth Routes', () => {
     expect(res.body.error).toBeDefined();
   });
 
+  it('POST /api/auth/register should handle Firestore errors gracefully', async () => {
+    // Mock Firestore set to reject with a numeric error code
+    const { db } = require('../config/firebase');
+    const mockSet = jest.fn().mockRejectedValue(new Error('Firestore write failed'));
+    mockSet.mock.results[0].value.code = 14; // gRPC UNAVAILABLE
+    db.collection.mockReturnValue({
+      doc: jest.fn(() => ({
+        set: mockSet,
+      })),
+    });
+
+    const res = await request(app)
+      .post('/api/auth/register')
+      .send({ email: 'test@example.com', password: 'Password123' });
+
+    // Should return 500 without crashing (no TypeError)
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBeDefined();
+    expect(res.body.code).toBe(500);
+  });
+
   it('POST /api/auth/login should return 400 for missing body', async () => {
     const res = await request(app).post('/api/auth/login').send({});
     expect(res.status).toBe(400);
