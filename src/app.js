@@ -15,7 +15,8 @@ const rateLimit = require('express-rate-limit');
 
 const authRoutes = require('./routes/auth');
 const todosRoutes = require('./routes/todos');
-const { notFoundHandler, globalErrorHandler } = require('./middleware/errorHandler');
+// Fix: errorHandler.js exports 'errorHandler', not 'globalErrorHandler'
+const { notFoundHandler, errorHandler } = require('./middleware/errorHandler');
 const logger = require('./utils/logger');
 
 const app = express();
@@ -119,6 +120,6 @@ app.use('/api/todos', todosRoutes);
 app.use(notFoundHandler);
 
 // Global error handler — must be last with 4 params
-app.use(globalErrorHandler);
+app.use(errorHandler);
 
 module.exports = app;
