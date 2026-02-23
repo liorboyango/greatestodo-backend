@@ -124,6 +124,19 @@ describe('errorHandler', () => {
     });
   });
 
+  it('should handle Firebase errors with numeric codes gracefully', () => {
+    const err = new Error('Firestore error');
+    err.code = 14; // Example numeric gRPC code
+    errorHandler(err, req, res, next);
+
+    // Should not throw TypeError and return 500 for unknown Firebase error
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      error: 'An unexpected error occurred. Please try again later.',
+      code: 500,
+    });
+  });
+
   it('should return 500 for unknown errors', () => {
     const err = new Error('Unknown error');
     errorHandler(err, req, res, next);
