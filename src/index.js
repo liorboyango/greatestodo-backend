@@ -21,7 +21,11 @@ const morgan = require('morgan');
 const { corsMiddleware } = require('./config/cors');
 const { apiLimiter, authLimiter } = require('./middleware/rateLimiter');
 const { notFoundHandler, errorHandler } = require('./middleware/errorHandler');
-const { verifyFirestoreConnection } = require('./config/firebase');
+const {
+  verifyFirestoreConnection,
+  verifyAdminSdkCredentials,
+  getInitializationStatus,
+} = require('./config/firebase');
 const authRoutes = require('./routes/auth');
 const todosRoutes = require('./routes/todos');
 
@@ -105,13 +109,20 @@ app.use('/api', apiLimiter);
  * GET /health
  * Simple health check endpoint for uptime monitoring and load balancers.
  * Not rate-limited (skipped in rateLimiter config).
+ * Includes Firebase initialization status for diagnostics.
  */
 app.get('/health', (req, res) => {
+  const firebaseStatus = getInitializationStatus();
   res.status(200).json({
     status: 'ok',
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
     environment: process.env.NODE_ENV || 'development',
+    firebase: {
+      initialized: firebaseStatus.initialized,
+      hasError: firebaseStatus.hasError,
+      projectId: firebaseStatus.serviceAccount ? firebaseStatus.serviceAccount.projectId : null,
+    },
   });
 });
 
@@ -156,20 +167,35 @@ const server = app.listen(PORT, () => {
   console.log(`[Server] Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`[Server] Health check: http://localhost:${PORT}/health`);
 
-  // Verify Firestore connectivity after server starts.
+  // Run comprehensive credential verification after server starts.
   // This is a non-blocking diagnostic check — the server continues
-  // running even if Firestore is temporarily unavailable.
-  // The check logs detailed diagnostics to help identify configuration issues.
-  verifyFirestoreConnection().then((isConnected) => {
-    if (isConnected) {
-      console.log('[Server] Firestore connectivity: OK');
+  // running even if verification fails.
+  verifyAdminSdkCredentials().then((credResult) => {
+    if (credResult.success) {
+      console.log('[Server] Firebase Admin SDK credential verification: PASSED');
     } else {
+      console.error('[Server] Firebase Admin SDK credential verification: FAILED');
+      console.error('[Server] Credential errors:', credResult.errors);
+      console.error('[Server] User registration and authentication will not work until credentials are fixed.');
+    }
+
+    // Only verify Firestore connectivity if credentials are valid
+    if (credResult.checks.sdkInitialized) {
+      return verifyFirestoreConnection();
+    }
+    return false;
+  }).then((isConnected) => {
+    if (isConnected === false) {
       console.warn(
         '[Server] Firestore connectivity: FAILED. ' +
         'User registration and todo operations will not work until this is resolved. ' +
         'Check the logs above for diagnostic details.'
       );
+    } else if (isConnected === true) {
+      console.log('[Server] Firestore connectivity: OK');
     }
+  }).catch((err) => {
+    console.error('[Server] Startup verification error:', err.message);
   });
 });
 
