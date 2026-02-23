@@ -15,6 +15,7 @@
 'use strict';
 
 const admin = require('firebase-admin');
+const logger = require('../utils/logger');
 
 /**
  * User document schema definition (for documentation and reference).
@@ -100,23 +101,89 @@ async function getUserById(db, uid) {
 /**
  * Creates a user document in Firestore.
  *
+ * This function writes a user profile document to the 'users' collection
+ * using the Firebase Auth UID as the document ID.
+ *
+ * Error handling:
+ * - gRPC NOT_FOUND (code 5): Indicates the Firestore database does not exist
+ *   or is not accessible. This is a configuration/infrastructure issue, not
+ *   a data issue. The error is re-thrown with a descriptive message.
+ * - Other errors: Re-thrown as-is for the caller to handle.
+ *
  * @param {FirebaseFirestore.Firestore} db - Firestore database instance
  * @param {string} uid - Firebase Auth UID
  * @param {string} email - User email
  * @param {string} [displayName] - Optional display name
  * @returns {Promise<Object>} Created user data (uid, email, displayName)
+ * @throws {Error} If Firestore write fails
  */
 async function createUser(db, uid, email, displayName = null) {
   const userDoc = createUserDocument(uid, email, displayName);
   const docRef = getUserRef(db, uid);
 
-  await docRef.set(userDoc);
-
-  return {
+  logger.info('[UserModel] Writing user document to Firestore', {
     uid,
     email: userDoc.email,
-    displayName: userDoc.displayName || null,
-  };
+    collection: 'users',
+    documentPath: `users/${uid}`,
+  });
+
+  try {
+    await docRef.set(userDoc);
+
+    logger.info('[UserModel] User document written successfully', {
+      uid,
+      email: userDoc.email,
+      documentPath: `users/${uid}`,
+    });
+
+    return {
+      uid,
+      email: userDoc.email,
+      displayName: userDoc.displayName || null,
+    };
+  } catch (err) {
+    // Diagnose gRPC NOT_FOUND errors specifically
+    // Error code 5 is the gRPC status code for NOT_FOUND
+    const isGrpcNotFound = err.code === 5 ||
+      (err.message && err.message.includes('NOT_FOUND'));
+
+    if (isGrpcNotFound) {
+      logger.error('[UserModel] Firestore NOT_FOUND error during user document creation', {
+        uid,
+        email: userDoc.email,
+        errorCode: err.code,
+        errorMessage: err.message,
+        diagnosis: [
+          'The Firestore (default) database may not exist in this Firebase project.',
+          'Verify the database is created in Firebase Console > Firestore Database.',
+          'Ensure the service account has the "Cloud Datastore User" or "Firebase Admin" role.',
+          'Check that the project_id in FIREBASE_SERVICE_ACCOUNT_JSON matches the Firebase project.',
+          'The preferRest setting should bypass gRPC issues — if this error persists, check IAM permissions.',
+        ].join(' | '),
+      });
+
+      // Re-throw with a more descriptive message
+      const enhancedError = new Error(
+        `Firestore database not found or not accessible for project. ` +
+        `Original error: ${err.message}. ` +
+        `Please ensure the Firestore (default) database exists in the Firebase Console ` +
+        `and the service account has the required permissions.`
+      );
+      enhancedError.code = err.code;
+      enhancedError.originalError = err;
+      throw enhancedError;
+    }
+
+    logger.error('[UserModel] Failed to write user document to Firestore', {
+      uid,
+      email: userDoc.email,
+      errorCode: err.code,
+      errorMessage: err.message,
+    });
+
+    throw err;
+  }
 }
 
 /**

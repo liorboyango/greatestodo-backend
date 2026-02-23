@@ -21,6 +21,7 @@ const morgan = require('morgan');
 const { corsMiddleware } = require('./config/cors');
 const { apiLimiter, authLimiter } = require('./middleware/rateLimiter');
 const { notFoundHandler, errorHandler } = require('./middleware/errorHandler');
+const { verifyFirestoreConnection } = require('./config/firebase');
 const authRoutes = require('./routes/auth');
 const todosRoutes = require('./routes/todos');
 
@@ -154,6 +155,22 @@ const server = app.listen(PORT, () => {
   console.log(`[Server] GreatesTODO backend running on port ${PORT}`);
   console.log(`[Server] Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`[Server] Health check: http://localhost:${PORT}/health`);
+
+  // Verify Firestore connectivity after server starts.
+  // This is a non-blocking diagnostic check — the server continues
+  // running even if Firestore is temporarily unavailable.
+  // The check logs detailed diagnostics to help identify configuration issues.
+  verifyFirestoreConnection().then((isConnected) => {
+    if (isConnected) {
+      console.log('[Server] Firestore connectivity: OK');
+    } else {
+      console.warn(
+        '[Server] Firestore connectivity: FAILED. ' +
+        'User registration and todo operations will not work until this is resolved. ' +
+        'Check the logs above for diagnostic details.'
+      );
+    }
+  });
 });
 
 /**
