@@ -9,6 +9,7 @@
  */
 
 const axios = require('axios');
+const admin = require('firebase-admin');
 const { getAuth } = require('../config/firebase');
 const { getFirestore } = require('../config/firebase');
 const { createError } = require('../middleware/errorHandler');
@@ -53,14 +54,13 @@ const register = async (req, res, next) => {
     logger.info('[Register] User created successfully', { uid: userRecord.uid, email });
 
     const { uid } = userRecord;
-    const now = new Date();
 
     logger.info('[Register] Storing user profile in Firestore', { uid, email });
     // Store user profile in Firestore
     await db.collection('users').doc(uid).set({
       uid,
       email,
-      createdAt: now,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
     logger.info('[Register] User profile stored', { uid, email });
 
