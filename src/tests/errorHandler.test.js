@@ -127,7 +127,10 @@ describe('errorHandler', () => {
   it('should handle Firebase errors with numeric codes gracefully', () => {
     const err = new Error('Firestore error');
     err.code = 14; // Example numeric gRPC code
+    const originalEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
     errorHandler(err, req, res, next);
+    process.env.NODE_ENV = originalEnv;
 
     // Should not throw TypeError and return 500 for unknown Firebase error
     expect(res.status).toHaveBeenCalledWith(500);

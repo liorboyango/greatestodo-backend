@@ -9,7 +9,6 @@
  */
 
 const axios = require('axios');
-const admin = require('firebase-admin');
 const { getAuth } = require('../config/firebase');
 const { getFirestore } = require('../config/firebase');
 const { createError } = require('../middleware/errorHandler');
