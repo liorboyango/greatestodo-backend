@@ -46,23 +46,12 @@ const logger = winston.createLogger({
   exitOnError: false,
 });
 
-/**
- * Creates a child logger with a fixed set of metadata fields.
- * Useful for adding request-scoped context (requestId, uid, email)
- * so every log line from a single request shares the same correlation ID.
- *
- * @param {Object} meta - Metadata to attach to every log call
- * @returns {winston.Logger} Child logger instance
- *
- * @example
- * const reqLogger = logger.child({ requestId: 'abc-123', uid: 'user456' });
- * reqLogger.info('User created'); // → { message: 'User created', requestId: 'abc-123', uid: 'user456' }
- */
-logger.child = (meta) => {
-  // Winston's built-in child() is available in v3+
-  // We wrap it to ensure consistent API usage across the codebase
-  return logger.child(meta);
-};
+// NOTE: Do NOT override logger.child here.
+// Winston v3+ provides a built-in child() method that correctly creates a
+// child logger inheriting the parent's transports and format while merging
+// the supplied metadata into every log entry.
+// Overriding it with a wrapper that calls logger.child(meta) would create
+// infinite recursion (RangeError: Maximum call stack size exceeded).
 
 /**
  * Generates a new unique request correlation ID.
@@ -76,6 +65,10 @@ logger.generateRequestId = () => uuidv4();
  * Creates a request-scoped logger that automatically includes
  * the requestId in every log call.
  *
+ * Uses Winston's built-in child() method (available since Winston v3)
+ * to create a child logger with the given metadata merged into every
+ * log entry produced by the returned logger instance.
+ *
  * @param {string} [requestId] - Correlation ID (auto-generated if not provided)
  * @param {Object} [extraMeta] - Additional metadata to include in every log
  * @returns {{ log: winston.Logger, requestId: string }}
@@ -87,6 +80,7 @@ logger.generateRequestId = () => uuidv4();
  */
 logger.forRequest = (requestId, extraMeta = {}) => {
   const id = requestId || uuidv4();
+  // Use Winston's native child() — no override needed
   const childLogger = logger.child({ requestId: id, ...extraMeta });
   return { log: childLogger, requestId: id };
 };
