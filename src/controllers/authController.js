@@ -16,6 +16,8 @@
  * 4. Generate and return a Firebase ID token
  */
 
+'use strict';
+
 const axios = require('axios');
 const { getAuth, getFirestore, ensureFirestoreReady } = require('../config/firebase');
 const { createError } = require('../middleware/errorHandler');
@@ -47,33 +49,42 @@ const { createUser } = require('../models/userModel');
  * @param {import('express').NextFunction} next
  */
 const register = async (req, res, next) => {
-  try {
-    const { email, password } = req.body;
+  const startTime = Date.now();
+  const requestId = req.id || 'unknown';
+  const { email, password } = req.body;
 
+  // Create a request-scoped logger so every log line shares the same requestId
+  const reqLogger = logger.child({ requestId, email, handler: 'register' });
+
+  try {
     // Log any existing auth token to verify no interference
     const authHeader = req.headers.authorization;
     if (authHeader) {
-      logger.warn('[Register] Auth header present during registration', {
-        email,
+      reqLogger.warn('[Register] Auth header present during registration — this is unexpected', {
         hasAuthHeader: true,
         authHeaderPrefix: authHeader.substring(0, 20) + '...'
       });
     } else {
-      logger.info('[Register] No auth header present during registration', { email });
+      reqLogger.debug('[Register] No auth header present during registration (expected)');
     }
 
     // ── Step 1: Firestore readiness check ────────────────────────────────────
     // Verify Firestore is accessible before creating the Firebase Auth user.
     // This prevents orphaned auth accounts when Firestore is misconfigured.
-    logger.info('[Register] Checking Firestore readiness before user creation', { email });
+    reqLogger.info('[Register] Step 1/4 — Checking Firestore readiness');
+    const firestoreCheckStart = Date.now();
     try {
       await ensureFirestoreReady();
-      logger.info('[Register] Firestore readiness check passed', { email });
+      reqLogger.info('[Register] Firestore readiness check passed', {
+        durationMs: Date.now() - firestoreCheckStart,
+      });
     } catch (firestoreErr) {
-      logger.error('[Register] Firestore readiness check failed — aborting registration', {
-        email,
+      const durationMs = Date.now() - firestoreCheckStart;
+      reqLogger.error('[Register] Firestore readiness check failed — aborting registration', {
+        durationMs,
         error: firestoreErr.message,
         code: firestoreErr.code,
+        diagnosis: firestoreErr.message,
       });
       // Return a 503 with a clear message so the client knows to retry later
       return res.status(503).json({
@@ -81,6 +92,7 @@ const register = async (req, res, next) => {
                'Please try again later or contact support if this persists.',
         code: 'FIRESTORE_UNAVAILABLE',
         retryable: true,
+        requestId,
       });
     }
 
@@ -88,7 +100,8 @@ const register = async (req, res, next) => {
     const db = getFirestore();
 
     // ── Step 2: Create user in Firebase Auth ──────────────────────────────────
-    logger.info('[Register] Creating user in Firebase Auth', { email });
+    reqLogger.info('[Register] Step 2/4 — Creating user in Firebase Auth');
+    const authCreateStart = Date.now();
     let userRecord;
     try {
       userRecord = await auth.createUser({
@@ -97,53 +110,65 @@ const register = async (req, res, next) => {
         emailVerified: false,
       });
     } catch (authErr) {
-      logger.error('[Register] Firebase Auth user creation failed', {
-        email,
+      const durationMs = Date.now() - authCreateStart;
+      reqLogger.error('[Register] Firebase Auth user creation failed', {
+        durationMs,
         error: authErr.message,
         code: authErr.code,
       });
       throw authErr;
     }
-    logger.info('[Register] Firebase Auth user created successfully', {
-      uid: userRecord.uid,
-      email,
-    });
 
     const { uid } = userRecord;
+    reqLogger.info('[Register] Firebase Auth user created successfully', {
+      uid,
+      durationMs: Date.now() - authCreateStart,
+    });
 
     // ── Step 3: Write user profile to Firestore ───────────────────────────────
     // If this fails, clean up the Firebase Auth user to prevent orphaned accounts.
-    logger.info('[Register] Storing user profile in Firestore', { uid, email });
+    reqLogger.info('[Register] Step 3/4 — Storing user profile in Firestore', { uid });
+    const firestoreWriteStart = Date.now();
     try {
       await createUser(db, uid, email);
-      logger.info('[Register] User profile stored in Firestore', { uid, email });
-    } catch (firestoreWriteErr) {
-      logger.error('[Register] Firestore write failed after Auth user creation — attempting cleanup', {
+      reqLogger.info('[Register] User profile stored in Firestore successfully', {
         uid,
-        email,
+        durationMs: Date.now() - firestoreWriteStart,
+      });
+    } catch (firestoreWriteErr) {
+      const durationMs = Date.now() - firestoreWriteStart;
+      reqLogger.error('[Register] Firestore write failed after Auth user creation — attempting cleanup', {
+        uid,
+        durationMs,
         error: firestoreWriteErr.message,
         code: firestoreWriteErr.code,
+        grpcCode: typeof firestoreWriteErr.code === 'number' ? firestoreWriteErr.code : null,
+        isNotFound: firestoreWriteErr.code === 5 || (firestoreWriteErr.message || '').includes('NOT_FOUND'),
+        isPermissionDenied: firestoreWriteErr.code === 7 || (firestoreWriteErr.message || '').includes('PERMISSION_DENIED'),
+        isUnavailable: firestoreWriteErr.code === 14 || (firestoreWriteErr.message || '').includes('UNAVAILABLE'),
       });
 
       // Attempt to delete the Firebase Auth user to prevent orphaned accounts.
       // If cleanup fails, log the error but still propagate the original error.
+      const cleanupStart = Date.now();
       try {
         await auth.deleteUser(uid);
-        logger.info('[Register] Firebase Auth user deleted during cleanup (Firestore write failed)', {
+        reqLogger.info('[Register] Firebase Auth user deleted during cleanup (Firestore write failed)', {
           uid,
-          email,
+          cleanupDurationMs: Date.now() - cleanupStart,
         });
       } catch (cleanupErr) {
-        logger.error(
+        reqLogger.error(
           '[Register] CRITICAL: Failed to delete Firebase Auth user after Firestore write failure. ' +
           'The user account is now orphaned — the user cannot re-register with this email ' +
           'until the Auth account is manually deleted from the Firebase Console.',
           {
             uid,
-            email,
+            cleanupDurationMs: Date.now() - cleanupStart,
             cleanupError: cleanupErr.message,
             cleanupCode: cleanupErr.code,
             originalError: firestoreWriteErr.message,
+            action: 'MANUAL_CLEANUP_REQUIRED',
           }
         );
       }
@@ -153,7 +178,7 @@ const register = async (req, res, next) => {
       // registration attempt will re-check rather than assuming Firestore is ready.
       const { checkFirestoreReadiness } = require('../config/firebase');
       checkFirestoreReadiness().catch((probeErr) => {
-        logger.warn('[Register] Background Firestore re-probe failed', {
+        reqLogger.warn('[Register] Background Firestore re-probe failed', {
           error: probeErr.message,
         });
       });
@@ -163,21 +188,32 @@ const register = async (req, res, next) => {
     }
 
     // ── Step 4: Generate ID token ─────────────────────────────────────────────
-    logger.info('[Register] Generating custom token for authentication', { uid, email });
+    reqLogger.info('[Register] Step 4/4 — Generating ID token for authentication', { uid });
+    const tokenStart = Date.now();
     const customToken = await auth.createCustomToken(uid);
     const token = await signInWithCustomToken(customToken);
-    logger.info('[Register] ID token generated successfully', { uid, email });
+    reqLogger.info('[Register] ID token generated successfully', {
+      uid,
+      tokenDurationMs: Date.now() - tokenStart,
+    });
+
+    const totalDurationMs = Date.now() - startTime;
+    reqLogger.info('[Register] Registration completed successfully', {
+      uid,
+      totalDurationMs,
+    });
 
     return res.status(201).json({
       token,
       user: { uid, email },
     });
   } catch (err) {
-    logger.error('[Register] Registration failed', {
-      email: req.body.email,
+    const totalDurationMs = Date.now() - startTime;
+    reqLogger.error('[Register] Registration failed', {
+      totalDurationMs,
       error: err.message,
       code: err.code,
-      stack: err.stack
+      stack: err.stack,
     });
     next(err);
   }
@@ -194,25 +230,45 @@ const register = async (req, res, next) => {
  * @param {import('express').NextFunction} next
  */
 const login = async (req, res, next) => {
-  try {
-    const { email, password } = req.body;
+  const startTime = Date.now();
+  const requestId = req.id || 'unknown';
+  const { email } = req.body;
 
+  const reqLogger = logger.child({ requestId, email, handler: 'login' });
+
+  try {
+    const { password } = req.body;
     const auth = getAuth();
 
+    reqLogger.info('[Login] Verifying user exists in Firebase Auth');
     // Verify user exists in Firebase Auth
     const userRecord = await auth.getUserByEmail(email).catch(() => null);
     if (!userRecord) {
+      reqLogger.warn('[Login] User not found in Firebase Auth', {
+        durationMs: Date.now() - startTime,
+      });
       return next(createError('Invalid email or password.', 401));
     }
 
+    reqLogger.info('[Login] User found — signing in via REST API', { uid: userRecord.uid });
     // Use Firebase REST API to sign in and get ID token
     const token = await signInWithEmailPassword(email, password);
+
+    reqLogger.info('[Login] Login successful', {
+      uid: userRecord.uid,
+      totalDurationMs: Date.now() - startTime,
+    });
 
     return res.status(200).json({
       token,
       user: { uid: userRecord.uid, email: userRecord.email },
     });
   } catch (err) {
+    reqLogger.error('[Login] Login failed', {
+      totalDurationMs: Date.now() - startTime,
+      error: err.message,
+      code: err.code,
+    });
     next(err);
   }
 };
@@ -314,9 +370,9 @@ const signInWithCustomToken = async (customToken) => {
 
     return response.data.idToken;
   } catch (err) {
-    logger.error('[SignInWithCustomToken] Authentication failed', {
+    logger.error('[SignInWithCustomToken] Failed to exchange custom token for ID token', {
       error: err.response?.data?.error?.message || err.message,
-      stack: err.stack
+      httpStatus: err.response?.status,
     });
     throw createError('Authentication failed. Please try again.', 500);
   }

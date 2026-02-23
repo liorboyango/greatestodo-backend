@@ -66,18 +66,12 @@ describe('errorHandler', () => {
   let req, res, next;
 
   beforeEach(() => {
-    req = { path: '/test', method: 'GET' };
+    req = { path: '/test', method: 'GET', id: 'test-request-id' };
     res = {
       status: jest.fn().mockReturnThis(),
       json: jest.fn().mockReturnThis(),
     };
     next = jest.fn();
-    // Suppress console.error in tests
-    jest.spyOn(console, 'error').mockImplementation(() => {});
-  });
-
-  afterEach(() => {
-    jest.restoreAllMocks();
   });
 
   it('should handle AppError with correct status and message', () => {
@@ -85,7 +79,18 @@ describe('errorHandler', () => {
     errorHandler(err, req, res, next);
 
     expect(res.status).toHaveBeenCalledWith(404);
-    expect(res.json).toHaveBeenCalledWith({ error: 'Not found', code: 404 });
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ error: 'Not found', code: 404 })
+    );
+  });
+
+  it('should include requestId in AppError response', () => {
+    const err = new AppError('Not found', 404);
+    errorHandler(err, req, res, next);
+
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ requestId: 'test-request-id' })
+    );
   });
 
   it('should handle JSON parse errors with 400', () => {
@@ -94,10 +99,12 @@ describe('errorHandler', () => {
     errorHandler(err, req, res, next);
 
     expect(res.status).toHaveBeenCalledWith(400);
-    expect(res.json).toHaveBeenCalledWith({
-      error: 'Invalid JSON in request body.',
-      code: 400,
-    });
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        error: 'Invalid JSON in request body.',
+        code: 400,
+      })
+    );
   });
 
   it('should handle payload too large with 413', () => {
@@ -106,10 +113,12 @@ describe('errorHandler', () => {
     errorHandler(err, req, res, next);
 
     expect(res.status).toHaveBeenCalledWith(413);
-    expect(res.json).toHaveBeenCalledWith({
-      error: 'Request body is too large.',
-      code: 413,
-    });
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        error: 'Request body is too large.',
+        code: 413,
+      })
+    );
   });
 
   it('should handle Firebase auth errors', () => {
@@ -118,32 +127,108 @@ describe('errorHandler', () => {
     errorHandler(err, req, res, next);
 
     expect(res.status).toHaveBeenCalledWith(409);
-    expect(res.json).toHaveBeenCalledWith({
-      error: 'An account with this email already exists.',
-      code: 409,
-    });
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        error: 'An account with this email already exists.',
+        code: 409,
+      })
+    );
   });
 
-  it('should handle Firebase errors with numeric codes gracefully', () => {
-    const err = new Error('Firestore error');
-    err.code = 14; // Example numeric gRPC code
+  it('should handle Firestore NOT_FOUND (gRPC code 5) with 503', () => {
+    const err = new Error('5 NOT_FOUND: ');
+    err.code = 5;
+    errorHandler(err, req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'FIRESTORE_NOT_FOUND',
+      })
+    );
+  });
+
+  it('should handle Firestore PERMISSION_DENIED (gRPC code 7) with 503', () => {
+    const err = new Error('7 PERMISSION_DENIED: ');
+    err.code = 7;
+    errorHandler(err, req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'FIRESTORE_PERMISSION_DENIED',
+      })
+    );
+  });
+
+  it('should handle Firestore UNAVAILABLE (gRPC code 14) with 503', () => {
+    const err = new Error('14 UNAVAILABLE: ');
+    err.code = 14;
+    errorHandler(err, req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'FIRESTORE_UNAVAILABLE',
+      })
+    );
+  });
+
+  it('should handle Firestore UNAUTHENTICATED (gRPC code 16) with 503', () => {
+    const err = new Error('16 UNAUTHENTICATED: ');
+    err.code = 16;
+    errorHandler(err, req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'FIRESTORE_UNAUTHENTICATED',
+      })
+    );
+  });
+
+  it('should handle enhanced Firestore error (with originalError property) with 503', () => {
+    const originalErr = new Error('5 NOT_FOUND: ');
+    originalErr.code = 5;
+    const enhancedErr = new Error('Firestore database not found or not accessible');
+    enhancedErr.code = 5;
+    enhancedErr.originalError = originalErr;
+    errorHandler(enhancedErr, req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'FIRESTORE_NOT_FOUND',
+      })
+    );
+  });
+
+  it('should return 500 for unknown errors in development', () => {
     const originalEnv = process.env.NODE_ENV;
-    process.env.NODE_ENV = 'production';
+    process.env.NODE_ENV = 'development';
+    const err = new Error('Unknown error');
     errorHandler(err, req, res, next);
     process.env.NODE_ENV = originalEnv;
 
-    // Should not throw TypeError and return 500 for unknown Firebase error
     expect(res.status).toHaveBeenCalledWith(500);
-    expect(res.json).toHaveBeenCalledWith({
-      error: 'An unexpected error occurred. Please try again later.',
-      code: 500,
-    });
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ error: 'Unknown error' })
+    );
   });
 
-  it('should return 500 for unknown errors', () => {
-    const err = new Error('Unknown error');
+  it('should hide error message in production for unknown errors', () => {
+    const originalEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    const err = new Error('Sensitive internal error');
     errorHandler(err, req, res, next);
+    process.env.NODE_ENV = originalEnv;
 
     expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        error: 'An unexpected error occurred. Please try again later.',
+        code: 500,
+      })
+    );
   });
 });
